@@ -1,4 +1,6 @@
-import { HandlerResObj } from "../forwarder";
+import * as http from "node:http";
+
+type HandlerResObj = http.ServerResponse & { req: http.IncomingMessage; };
 
 export class ResponseWrapper {
   constructor(public response: HandlerResObj) {

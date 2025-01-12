@@ -1,8 +1,9 @@
 {
-  "name": "noedjstest",
+  "name": "quickhttp",
   "version": "1.0.0",
   "description": "",
   "main": "src/index.ts",
+  "types": "./@types",
   "scripts": {
     "compile": "npx tsc -p ./tsconfig.json",
     "start": "pnpm run compile && node ./build/index.js",

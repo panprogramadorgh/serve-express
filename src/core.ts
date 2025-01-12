@@ -1,6 +1,6 @@
 import * as http from "node:http";
-import { Endpoint } from "./endpoint";
-import { ResponseWrapper } from "./response-wrapper";
+import { Endpoint } from "endpoint";
+import { ResponseWrapper } from "response-wrapper";
 
 export class QuickHTTP {
   private binders: Endpoint.Binder<Endpoint.Handler | Endpoint.MidHandler>[] = [];
@@ -40,10 +40,6 @@ export class QuickHTTP {
     return binder;
   }
   */
-
-  public prtEndpoints(): void {
-    console.log(this.binders);
-  }
 
   public listen(port: number, callback?: () => void): void {
     const server = http.createServer((req, res) => {
