@@ -1,0 +1,1 @@
+export type HandlerResObj = http.ServerResponse & { req: http.IncomingMessage; };
