@@ -8,9 +8,11 @@ dependencies:
   '@types/node':
     specifier: ^22.10.5
     version: 22.10.5
-  typescript:
-    specifier: ^5.7.3
-    version: 5.7.3
+
+devDependencies:
+  pnpx:
+    specifier: ^0.0.1
+    version: 0.0.1
 
 packages:
 
@@ -20,11 +22,10 @@ packages:
       undici-types: 6.20.0
     dev: false
 
-  /typescript@5.7.3:
-    resolution: {integrity: sha512-84MVSjMEHP+FQRPy3pX9sTVV/INIex71s9TL2Gm5FG/WG1SqXeKyZ0k7/blY/4FdOzI12CBy1vGc4og/eus0fw==}
-    engines: {node: '>=14.17'}
+  /pnpx@0.0.1:
+    resolution: {integrity: sha512-mBRUYL3Stk3D9Lm2Bpk9hpCeo9X1QcFUTfwyBEjVDJpI/1/xOxruz5nHJuQLnaBWddAI+iNgo/2qY0qt0Nnf/w==}
     hasBin: true
-    dev: false
+    dev: true
 
   /undici-types@6.20.0:
     resolution: {integrity: sha512-Ny6QZ2Nju20vw1SRHe3d9jVu6gJ+4e3+MMpqu7pqE5HT6WsTSlce++GQmK5UXS8mzV8DSYHrQH+Xrf2jVcuKNg==}
