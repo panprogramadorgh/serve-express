@@ -2,10 +2,11 @@
   "name": "quickhttp",
   "version": "1.0.0",
   "description": "",
-  "main": "./src/index.ts",
+  "main": "./dist/node16/core.js",
   "types": "./@types/index.d.ts",
   "scripts": {
-    "compile": "npx tsc -p ./tsconfig.json && cp ./src/index.d.ts ./@types",
+    "node16": "npx tsc -p ./tsconfig.json && cp ./src/index.d.ts ./@types",
+    "cjs": "npx tsc -p ./tsconfig-cjs.json && cp ./src/index.d.ts ./@types",
     "init-tsconfig": "pnpx tsc --init"
   },
   "keywords": [],
