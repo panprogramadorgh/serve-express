@@ -1,6 +1,5 @@
-import * as http from "node:http";
 import { Endpoint } from "./endpoint";
-import { ResponseWrapper } from "./response-wrapper";
+import { ResponseWrapper } from "./response";
 
 export class QuickHTTP {
   private binders: Endpoint.Binder<Endpoint.Handler | Endpoint.MidHandler>[] = [];
@@ -41,25 +40,32 @@ export class QuickHTTP {
   }
   */
 
+  /* FIXME: Actualizar para el nuevo Response */
   public listen(port: number, callback?: () => void): void {
-    const server = http.createServer((req, res) => {
-      for (const binder of this.binders) {
-        if (req.url != binder.path)
-          continue;
+    const server_binders = this.binders;
+    Bun.serve({
+      port,
+      fetch(req) {
+        for (const binder of server_binders) {
+          if (req.url != binder.path)
+            continue;
 
-        // Method verification
-        const method = req.method != undefined && Endpoint.stringToMethod[req.method as string];
-        if (!method || !binder.handlers[method]) {
-          res.statusCode = 400;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ error: "Unsopported method" }));
-          return;
+          // Method verification
+          const method = req.method != undefined && Endpoint.stringToMethod[req.method as string];
+          if (!method || !binder.handlers[method]) {
+            return new Response(JSON.stringify({ error: "Unsopported method" }), {
+              status: 400, headers: {
+                "Content-Type": "application/json"
+              }
+            });
+          }
+
+          // Calls the correspondig handler
+          binder.handlers[method](req, new ResponseWrapper(res));
         }
 
-        // Calls the correspondig handler
-        binder.handlers[method](req, new ResponseWrapper(res));
+        return new Response();
       }
-    })
-    server.listen(port, callback);
+    });
   }
 }

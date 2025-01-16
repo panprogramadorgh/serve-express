@@ -1,18 +1,19 @@
 {
   "name": "quickhttp",
   "version": "1.0.0",
-  "description": "",
+  "author": "",
   "main": "./dist/node16/core.js",
-  "types": "./@types/index.d.ts",
+  "devDependencies": {
+    "@types/bun": "^1.1.16",
+    "@types/node": "^22.10.7"
+  },
+  "description": "",
+  "keywords": [],
+  "license": "ISC",
   "scripts": {
     "node16": "npx tsc -p ./tsconfig.json && cp ./src/index.d.ts ./@types",
     "cjs": "npx tsc -p ./tsconfig-cjs.json && cp ./src/index.d.ts ./@types",
     "init-tsconfig": "pnpx tsc --init"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "@types/node": "^22.10.5"
-  }
+  "types": "./@types/index.d.ts"
 }
