@@ -1,6 +1,6 @@
 import { TransformStream, WritableStream, ReadableStream } from "stream/web";
 
-export namespace ServeExpress {
+namespace ServeExpress {
   export class Response {
     private status_code: number;
     private headers: Record<string, string> = {};
