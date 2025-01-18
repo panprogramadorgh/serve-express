@@ -21,17 +21,20 @@ namespace ServeExpress {
   }
   export type ReqMethod = ReqMethods[keyof ReqMethods];
   export type AnyReqMethod = HandlerKey.any;
+  export const AnyReqMethod = HandlerKey.any;
 
   export type HandlerLike = Handler | Middleware;
-  export type Handler = (req: globalThis.Request) => ServeExpress.Response;
-  export type Middleware = (req: globalThis.Request, next: HandlerLike) => ServeExpress.Response;
+  export type Handler = (req: globalThis.Request) => globalThis.Response;
+  export type Middleware = (req: globalThis.Request, next: HandlerLike) => globalThis.Response;
 
-  type SelectReqMethod<T extends HandlerLike> = T extends Handler ? ReqMethod : AnyReqMethod;
-  export interface Binder<T extends HandlerLike, M extends SelectReqMethod<T> = SelectReqMethod<T>> {
+  export type Binder<T extends HandlerLike> = T extends Handler ? {
     path: string;
-    handlers: {
-      [K in M]: T;
+    req_handlers: {
+      [K in ReqMethod]: Handler;
     }
+  } : {
+    path: string;
+    mid_handler: Middleware
   }
 
   /* Rutinas */
