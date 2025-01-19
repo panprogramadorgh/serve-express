@@ -47,11 +47,19 @@ namespace ServeExpress {
     }
 
     public send(message: string): globalThis.Response {
+      const default_content_type = "text/plain";
+      if (!this.headers["Content-Type"]) {
+        this.headers['Content-Type'] = default_content_type;
+      }
       return new globalThis.Response(message, { status: this.status_code, headers: this.headers })
     }
 
     public json(data: any): globalThis.Response {
       const json_message = JSON.stringify(data);
+      const defualt_content_type = "application/json";
+      if (!this.headers["Content-Type"]) {
+        this.headers["Content-Type"] = defualt_content_type;
+      }
       return new globalThis.Response(json_message, { status: this.status_code, headers: this.headers });
     }
   }

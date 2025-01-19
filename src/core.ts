@@ -2,21 +2,66 @@
 /// <reference path="./request.ts" />
 
 namespace ServeExpress {
-  export class Server {
-    private binders: ServeExpress.Binder<ServeExpress.HandlerLike>[] = [];
+  /* Endpoint and middleware related types */
 
-    // TODO: Metodo estatico creacion de binders
-    private static bind<T extends ServeExpress.HandlerLike>(options: ((T extends ServeExpress.Handler ? {
-      method: ServeExpress.ReqMethod;
+  enum HandlerKey {
+    get = 1, // Avoids confusions with or and negation operator
+    post,
+    patch,
+    delete,
+    any
+  }
+  type ReqMethods = Omit<typeof HandlerKey, "any">;
+  const ReqMethods: ReqMethods =
+  {
+    get: HandlerKey.get,
+    post: HandlerKey.post,
+    patch: HandlerKey.patch,
+    delete: HandlerKey.delete
+  }
+  type ReqMethod = ReqMethods[keyof ReqMethods];
+  type AnyReqMethod = HandlerKey.any;
+  const AnyReqMethod = HandlerKey.any;
+
+  type HandlerLike = Handler | Middleware;
+  type Handler = (req: globalThis.Request) => globalThis.Response;
+  type Middleware = (req: globalThis.Request, next: HandlerLike) => globalThis.Response;
+
+  type Binder<T extends HandlerLike> = T extends Handler ? {
+    path: string;
+    req_handlers: {
+      [K in ReqMethod]: globalThis.Response | Handler;
+    }
+  } : {
+    path: string;
+    mid_handler: globalThis.Response | Middleware
+  }
+
+  type BindOptions<T extends HandlerLike> =
+    (T extends Handler ? {
+      method: ReqMethod;
     } : {
-      method: ServeExpress.AnyReqMethod;
+      method: AnyReqMethod;
     }) & {
-      binders_arr: ServeExpress.Binder<ServeExpress.HandlerLike>[],
+      binders_arr: Binder<HandlerLike>[],
       path: string,
       res_generator: globalThis.Response | T;
-    })): ServeExpress.Binder<T> {
+    }
+
+  /* Rutinas */
+
+  /// @brief Convierte metodos de solicitud en formato string a ReqMethod
+  function string_to_method(stringifyed_method: string): ReqMethod | undefined {
+    return (ReqMethods as Record<string, ReqMethod>)[stringifyed_method];
+  }
+
+  export class Server {
+    private binders: Binder<HandlerLike>[] = [];
+
+    // TODO: Metodo estatico creacion de binders
+    private static bind<T extends HandlerLike>(options: BindOptions<T>): Binder<T> {
       let binder_index = -1;
-      for (const each_binder_index in options.binders_arr) {
+      for (let each_binder_index = 0; each_binder_index < options.binders_arr.length; each_binder_index++) {
         if (options.binders_arr[each_binder_index].path == options.path) {
           binder_index = each_binder_index;
           break;
@@ -31,8 +76,24 @@ namespace ServeExpress {
        El metodo debe retornar ademas el nuevo binder creado
       */
 
-      if (binder_index <= 1) {
-        // TODO: Crear binder dentro de binders_arr y definir primer handler para binder en req_handlers
+      if (options.method == AnyReqMethod) {
+        options.binders_arr[binder_index] =
+        {
+          path: options.path,
+          mid_handler: options.res_generator
+        }
+      } else if (binder_index == -1) {
+        //  FIXME: Object.fromEntries convierte las claves en string, por lo tanto no son ReqMethod
+
+        options.binders_arr[binder_index] =
+        {
+          path: options.path,
+          req_handlers: Object.fromEntries(Object.values(ReqMethods).map((method) => {
+            return [method, undefined];
+          }))
+        }
+      } else { // binder_index > -1 && Object.values(ReqMethods).includes(options.method)
+
       }
 
       // TODO: Definir handler para binder existente
