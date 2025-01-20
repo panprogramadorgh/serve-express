@@ -1,7 +1,5 @@
 /// <reference path="./response.ts" />
 
-import { BinaryToTextEncoding } from "crypto";
-
 export namespace ServeExpress {
   /* Endpoint and middleware related types */
 
@@ -26,7 +24,7 @@ export namespace ServeExpress {
 
   type HandlerLike = Handler | Middleware;
   type Handler = (req: globalThis.Request) => globalThis.Response;
-  type Middleware = (req: globalThis.Request, next: HandlerLike) => globalThis.Response;
+  type Middleware = (req: globalThis.Request, next: (error: boolean) => void) => globalThis.Response;
 
   type Binder<T extends HandlerLike> = T extends Handler ? {
     path: string;
@@ -66,11 +64,18 @@ export namespace ServeExpress {
   }
 
   export class Server {
+    /*
+      Asocia paths con endpoint handlers y en ocasiones middlewares. Multiples middlewares para un path pueden ser definidos y estos se ejecutaran en el mismo orden en el que fueron definidos.
+
+      Nota: Para un mismo path, los middleware definidos posteriormente a handler binder seran ignorados para evitar http response splitting.
+    */
+
     private binders: Binder<HandlerLike>[] = [];
 
-    /*
-      Add the following constraint to bind method:
+    // TODO: Crear segundo binders para middleware de errores
 
+    /*
+      Bind method constraints:
         1. Cannot bind a middleware whose path isn't associated with a handler-binder
         2. Cannot have two or more handler-binders associated with the same path, instead we should only be able to override binder-handler method handlers functions if exists (however multiple middlewares may be binded atop the same path)
     */
@@ -142,7 +147,6 @@ export namespace ServeExpress {
 
     // TODO: Finish implementation of remaining methods
 
-    /* FIXME: Actualizar para el nuevo Response */
     public listen(port: number, callback?: () => void): void {
       const server_binders = this.binders;
       Bun.serve({
@@ -158,26 +162,33 @@ export namespace ServeExpress {
               return Response.json({ error: "Unrecognized method" }, { status: 400 })
             }
 
-            // TODO: Ejecutar middlewares precedentes al Binder<Handler>
-
-            // Type guard for Binder<Handler>
-            if ((binder as Binder<Handler>).req_handlers) {
-              const res_generator = (binder as Binder<Handler>).req_handlers[method];
+            /*
+              El metodo fetch finaliza en el momento en el que se retorna una respuesta en el metodo fetch. Esto puede suceder en:
+                1. Secuencia de middleware
+                2. Secuencia de middleware de error (en caso de error en middleware)
+                3. Tras finalizar la secuencia de middleware, en el binder handler
+            */
+            if ((binder as Binder<Middleware>).mid_handler) {
+              const res_generator = (binder as Binder<Middleware>).mid_handler
               if (typeof res_generator == "function") {
-                return res_generator(req);
+                return res_generator(req, (error: boolean) => {
+                  // TODO: En caso de error ejecutar cadena middlewares de error 
+                  // TODO: En caso de no haber error seguir con siguiente middleware
+                });
               }
-              return res_generator; // Static response
+              return res_generator;
             }
 
-            // Binder<Middleware>
-            const res_generator = (binder as Binder<Middleware>).mid_handler;
+            // Handler binder response
+            const res_generator = (binder as Binder<Handler>).req_handlers[method];
             if (typeof res_generator == "function") {
               return res_generator(req);
             }
             return res_generator; // Static response
           }
 
-          return new Response();
+          const not_found_res = Response.json({ error: "not found" }, { status: 404 });
+          return not_found_res;
         }
       });
 

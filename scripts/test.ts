@@ -1,9 +1,9 @@
-import { ServeExpress } from "core";
+import { ServeExpress } from "index";
 
-const app = new ServeExpress.Server();
+const server = new ServeExpress.Server();
 
-app.get("/", () => Response.json({ data: "message" }, { status: 200 }));
+server.get("/", Response.json({ message: "hello world" }, { status: 200 }));
 
-app.listen(3000, () => {
+server.listen(3000, () => {
   console.log("Server listening on 3000");
-});
+})
