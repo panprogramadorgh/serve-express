@@ -1,4 +1,4 @@
-import { Server, MiddlewareCb } from "index";
+import { Server } from "index";
 
 const server = new Server();
 
@@ -6,6 +6,7 @@ const server = new Server();
 server.use("/", (req, next) => {
   return new Response();
 })
+
 server.get("/", Response.json({ message: "hello world" }, { status: 200 }));
 
 server.listen(3000, () => {
