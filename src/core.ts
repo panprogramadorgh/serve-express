@@ -118,94 +118,61 @@ export class Server {
         throw new Error("Cannot bind a middleware handler whose path isn't associated with an endpoint handler binder first");
       }
     } else if (is_endpoint_bind_options(options)) {
+      // Overrides current handler for the specified method
       if (binder && is_endpoint_binder(binder)) {
-        // options.binders_arr[bindex];
-        // TODO: TERMINAR
+        (options.binders_arr[bindex] as Binder<EndpointHandler>).method_handlers[options.method] = options.response;
       }
+      // Creates a new endpoint binder from scratch  
+      else if (!binder) {
+        options.binders_arr.unshift({
+          path: options.path,
+          method_handlers: create_binder_handlers()
+        })
+      }
+      // In case options.binders_arr breaks constraint 1. then will be ignored (we have taken care in above middleware options parameter if statement)
     } else {
       throw new Error("Run time bind options type checking failure");
     }
 
-    if (binder && is_middleware_binder(binder)) {
-
-    } else if (binder && is_endpoint_binder(binder)) {
-
-    } else {
-      throw new Error("Run time binding type checking failure");
-    }
-
-
-
-    // Configures res_generator based on run time checkings
-    if (options.method == AnyReqMethod) {
-      options.binders_arr.push({
-        path: options.path,
-        mid_handler: options.res_generator
-      });
-
-      binder_index = options.binders_arr.length - 1;
-    } else if (binder_index == -1) { // Creates the EndpointHandler-binder cos doesn't exists
-      options.binders_arr.push({
-        path: options.path,
-        req_handlers: init_req_handlers()
-      });
-      (options.binders_arr[options.binders_arr.length - 1] as Binder<EndpointHandler>).req_handlers[options.method] = options.res_generator as Response | EndpointHandler;
-
-      binder_index = options.binders_arr.length - 1;
-    } else { // binder_index >= 0 && Object.values(ReqMethods).includes(options.method)
-      (options.binders_arr[binder_index] as Binder<EndpointHandler>).req_handlers[options.method] = options.res_generator as Response | EndpointHandler;
-    }
-
-    return options.binders_arr[binder_index] as Binder<T>;
+    return (binder as unknown) as Binder<Extract<T, HandlerLike>> | never; // All run time type checkings ensures this assertion to be safety
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
-  public get(path: string, EndpointHandler: Response | EndpointHandler): Binder<EndpointHandler> {
-    return Server.bind({
-      binders_arr: this.binders,
-      method: ReqMethods.get,
+  public get(path: string, handler: Response | EndpointHandler): Binder<EndpointHandler> | never {
+    return Server.bind<EndpointHandler>({
       path,
-      res_generator: EndpointHandler
+      binders_arr: this.binders,
+      method: "get",
+      response: handler
     })
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
-  public post(path: string, EndpointHandler: Response | EndpointHandler): Binder<EndpointHandler> {
-    return Server.bind({
-      binders_arr: this.binders,
-      method: ReqMethods.post,
+  public post(path: string, handler: Response | EndpointHandler): Binder<EndpointHandler> | never {
+    return Server.bind<EndpointHandler>({
       path,
-      res_generator: EndpointHandler
+      binders_arr: this.binders,
+      method: "post",
+      response: handler
     })
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
-  public patch(path: string, EndpointHandler: Response | EndpointHandler): Binder<EndpointHandler> {
-    return Server.bind({
-      binders_arr: this.binders,
-      method: ReqMethods.patch,
+  public patch(path: string, handler: Response | EndpointHandler): Binder<EndpointHandler> | never {
+    return Server.bind<EndpointHandler>({
       path,
-      res_generator: EndpointHandler
+      binders_arr: this.binders,
+      method: "path",
+      response: handler
     })
   }
 
-  /// @brief MiddlewareHandler binding support
-  public use(path: string, EndpointHandler: Response | MiddlewareHandler): Binder<MiddlewareHandler> {
-    return Server.bind({
-      binders_arr: this.binders,
-      method: AnyReqMethod,
+  /// @brief Supports static responses system (built atop bun's static responses)
+  public use(path: string, handler: MiddlewareHandler, error?: boolean): Binder<MiddlewareHandler> | never {
+    return Server.bind<MiddlewareHandler>({
       path,
-      res_generator: EndpointHandler
-    })
-  }
-
-  /// @brief Error MiddlewareHandler binding support
-  public useError(path: string, EndpointHandler: Response | MiddlewareHandler): Binder<MiddlewareHandler> {
-    return Server.bind({
-      binders_arr: this.error_binders,
-      method: AnyReqMethod,
-      path,
-      res_generator: EndpointHandler
+      binders_arr: error ? this.error_binders : this.binders,
+      response: handler
     })
   }
 
@@ -223,8 +190,7 @@ export class Server {
             continue;
 
           /* Method verification is important since it could be unrecognized or not supported */
-          const method = string_to_method(req.method);
-          if (!method) {
+          if (!is_endpoint_method(req.method)) {
             return Response.json({ error: "Unrecognized method" }, { status: 400 })
           }
 
@@ -235,59 +201,59 @@ export class Server {
               3. Tras finalizar la secuencia de MiddlewareHandler, en el binder EndpointHandler
           */
           if (is_middleware_binder(binder)) {
-            const res_generator = binder.mid_handler
-            if (typeof res_generator == "function") {
-              /*
+            const { middleware_handler } = binder;
+
+            /*
                 Posibilidades de comportamiento para middlware y MiddlewareHandler de errores:
                   1. Retornar respuesta y error = false (No permitido res + error = true ; ignorado)
                   2. No retornar respuesta y error = false (pasa al sigiente mid)
                   3. No retornar respuesta y error = true (se ejecutan los mid de error)
-              */
-              let nextcb_output: 0 | 1 | 2 = 2; // Por defecto el estado es 2, es decir, no ejectado
-              const res = res_generator(req, (error) => {
-                nextcb_output = error ? 1 : 0;
-              });
+            */
 
-              if (res) // Da salida a la peticion
-                return res;
+            // TODO: Arreglar manejo middleware con nuevo sistema de tipos.
+            // TODO: Convertir en opcional el parametro de next (siguiente middleware sin saltar a los middleware de error ni escribir en la pila de errores)
+            // TODO: Implementar pila de errores para cadena de middleware (argumento de next)
 
-              if (nextcb_output == 2) // Se debe configurar desde el callback cual sera el siguiente paso
-                throw new Error("no-response middlewares should call next() callback");
+            let nextcb_output: 0 | 1 | 2 = 2; // Por defecto el estado es 2, es decir, no ejectado
+            const res = res_generator(req, (error) => {
+              nextcb_output = error ? 1 : 0;
+            });
 
-              if (nextcb_output) // Carga los MiddlewareHandler de error
-              {
-                for (const error_binder of error_binders) {
-                  const err_res_generator = error_binder.mid_handler;
-                  if (typeof err_res_generator == "function") {
-                    let err_nextcb_output: 0 | 1 | 2 = 2; // No ejecutado por defecto.
-                    const error_mid_res = err_res_generator(req, (error) => {
-                      err_nextcb_output = error ? 1 : 0;
-                    });
+            if (res) // Da salida a la peticion
+              return res;
 
-                    if (error_mid_res)
-                      return error_mid_res;
+            if (nextcb_output == 2) // Se debe configurar desde el callback cual sera el siguiente paso
+              throw new Error("no-response middlewares should call next() callback");
 
-                    if (err_nextcb_output == 2)
-                      throw new Error("no-response middlewares should call next() callback");
+            if (nextcb_output) // Carga los MiddlewareHandler de error
+            {
+              for (const error_binder of error_binders) {
+                const err_res_generator = error_binder.mid_handler;
+                if (typeof err_res_generator == "function") {
+                  let err_nextcb_output: 0 | 1 | 2 = 2; // No ejecutado por defecto.
+                  const error_mid_res = err_res_generator(req, (error) => {
+                    err_nextcb_output = error ? 1 : 0;
+                  });
 
-                    continue;
-                  }
-                  // TODO: Doesn't have sense a static response MiddlewareHandler
-                  // Static response
-                  // return res_generatFor;
+                  if (error_mid_res)
+                    return error_mid_res;
+
+                  if (err_nextcb_output == 2)
+                    throw new Error("no-response middlewares should call next() callback");
+
+                  continue;
                 }
-
-                // El ultimo MiddlewareHandler de error debe retornar una respuesta incondicionalmente, de lo contrario se lazaremos una excepcion crhaseando el servidor
-                throw new Error("No response given in error MiddlewareHandler chain");
+                // TODO: Doesn't have sense a static response MiddlewareHandler
+                // Static response
+                // return res_generatFor;
               }
 
-              // Siguiente MiddlewareHandler / endpoint EndpointHandler 
-              continue;
+              // El ultimo MiddlewareHandler de error debe retornar una respuesta incondicionalmente, de lo contrario se lazaremos una excepcion crhaseando el servidor
+              throw new Error("No response given in error MiddlewareHandler chain");
             }
 
-            // TODO: Doesn't have sense a static response MiddlewareHandler
-            // Static response
-            return res_generator;
+            // Siguiente MiddlewareHandler / endpoint EndpointHandler 
+            continue;
           }
 
           // EndpointHandler binder response

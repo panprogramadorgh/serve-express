@@ -4,8 +4,12 @@ const server = new Server();
 
 // FIXME: Inferencia de tipos
 server.use("/", (req, next) => {
-  return new Response();
+  return next();
 })
+
+server.use("/", (req, next) => {
+  return next("new error");
+});
 
 server.get("/", Response.json({ message: "hello world" }, { status: 200 }));
 
