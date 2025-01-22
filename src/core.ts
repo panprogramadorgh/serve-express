@@ -1,5 +1,7 @@
 /* Generic and global type utilities */
 
+import { readdirSync } from "fs";
+
 /// @brief Infers return type from function / method
 type GetReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
 
@@ -16,7 +18,8 @@ type EndpointHandler = (req: Request) => Response;
 type MiddlewareHandler = (req: Request, next: MiddlewareNext) =>
   Response | GetReturnType<MiddlewareNext>;
 /* El mensaje de error se acumula en la pila de errores para el MiddlewareHandler de errores */
-type MiddlewareNext = (error_message: string) => string;
+type MiddlewareNext =
+  ((message?: string) => { error_stack_piece: string | null })
 
 type HandlerLike = EndpointHandler | MiddlewareHandler;
 
@@ -49,17 +52,24 @@ function is_endpoint_binder<T extends Binder<HandlerLike>>(binder: T): binder is
 function is_middleware_binder<T extends Binder<HandlerLike>>(binder: T): binder is Extract<T, Binder<MiddlewareHandler>> {
   return typeof (binder as Extract<T, Binder<MiddlewareHandler>>).middleware_handler != "undefined";
 }
+
 function is_endpoint_bind_options<T extends BindOptions<HandlerLike>>(bind_options: T): bind_options is Extract<T, BindOptions<EndpointHandler>> {
   return typeof (bind_options as BindOptions<EndpointHandler>).method != "undefined"
 }
 function is_middleware_bind_options<T extends BindOptions<HandlerLike>>(bind_options: T): bind_options is Extract<T, BindOptions<MiddlewareHandler>> {
   return typeof (bind_options as BindOptions<EndpointHandler>).method == "undefined"
 }
-function is_endpoint_method(supposted_method: string) {
+
+function is_endpoint_method(supposted_method: string): supposted_method is EndpointMethod {
   let includes = false;
   for (const method_name of endpoint_methods)
     includes = method_name == supposted_method;
   return includes;
+}
+
+function is_middleware_next_return(middleware_return: GetReturnType<MiddlewareHandler>):
+  middleware_return is GetReturnType<MiddlewareNext> {
+  return typeof (middleware_return as GetReturnType<MiddlewareNext>).error_stack_piece != "undefined";
 }
 
 /// @brief Inicializa todos handlers de un binder con una respuesta estandar
@@ -189,20 +199,27 @@ export class Server {
           if (req.url != binder.path)
             continue;
 
-          /* Method verification is important since it could be unrecognized or not supported */
-          if (!is_endpoint_method(req.method)) {
-            return Response.json({ error: "Unrecognized method" }, { status: 400 })
-          }
-
           /*
             El metodo fetch finaliza en el momento en el que se retorna una respuesta en el metodo fetch. Esto puede suceder en:
               1. Secuencia de MiddlewareHandler
               2. Secuencia de MiddlewareHandler de error (en caso de error en MiddlewareHandler)
               3. Tras finalizar la secuencia de MiddlewareHandler, en el binder EndpointHandler
           */
-          if (is_middleware_binder(binder)) {
-            const { middleware_handler } = binder;
+          if (is_endpoint_binder(binder)) {
+            /* Method verification is important since it could be unrecognized or not supported */
+            if (!is_endpoint_method(req.method)) {
+              return Response.json({ error: "Unrecognized method" }, { status: 400 })
+            }
 
+            // EndpointHandler binder response
+            const response = binder.method_handlers[req.method];
+            if (typeof response == "function")
+              return response(req);
+            return response;
+          }
+          else {
+            const { middleware_handler } = binder;
+            const error_stack: string[] = [];
             /*
                 Posibilidades de comportamiento para middlware y MiddlewareHandler de errores:
                   1. Retornar respuesta y error = false (No permitido res + error = true ; ignorado)
@@ -210,58 +227,43 @@ export class Server {
                   3. No retornar respuesta y error = true (se ejecutan los mid de error)
             */
 
-            // TODO: Arreglar manejo middleware con nuevo sistema de tipos.
-            // TODO: Convertir en opcional el parametro de next (siguiente middleware sin saltar a los middleware de error ni escribir en la pila de errores)
-            // TODO: Implementar pila de errores para cadena de middleware (argumento de next)
+            // TODO: Crear mecanismo de acceso a la pila de errores desde los middleware
 
-            let nextcb_output: 0 | 1 | 2 = 2; // Por defecto el estado es 2, es decir, no ejectado
-            const res = res_generator(req, (error) => {
-              nextcb_output = error ? 1 : 0;
-            });
+            const res = middleware_handler(req, function next(message) {
+              if (message && message.trim())
+                return { error_stack_piece: message }
+              else
+                return { error_stack_piece: null };
+            })
 
-            if (res) // Da salida a la peticion
+            if (!is_middleware_next_return(res))
               return res;
-
-            if (nextcb_output == 2) // Se debe configurar desde el callback cual sera el siguiente paso
-              throw new Error("no-response middlewares should call next() callback");
-
-            if (nextcb_output) // Carga los MiddlewareHandler de error
-            {
-              for (const error_binder of error_binders) {
-                const err_res_generator = error_binder.mid_handler;
-                if (typeof err_res_generator == "function") {
-                  let err_nextcb_output: 0 | 1 | 2 = 2; // No ejecutado por defecto.
-                  const error_mid_res = err_res_generator(req, (error) => {
-                    err_nextcb_output = error ? 1 : 0;
+            else {
+              if (res.error_stack_piece) // Carga los MiddlewareHandler de error
+              {
+                for (const error_binder of error_binders) {
+                  const { middleware_handler } = error_binder;
+                  const error_res = middleware_handler(req, function next(message = "") {
+                    if (message.trim()) {
+                      return { error_stack_piece: message };
+                    }
+                    return { error_stack_piece: null };
                   });
 
-                  if (error_mid_res)
-                    return error_mid_res;
-
-                  if (err_nextcb_output == 2)
-                    throw new Error("no-response middlewares should call next() callback");
-
-                  continue;
+                  if (!is_middleware_next_return(error_res))
+                    return error_res;
+                  else if (res.error_stack_piece) {
+                    error_stack.push(res.error_stack_piece);
+                  }
                 }
-                // TODO: Doesn't have sense a static response MiddlewareHandler
-                // Static response
-                // return res_generatFor;
+
+                // El ultimo MiddlewareHandler de error debe retornar una respuesta incondicionalmente, de lo contrario se lazaremos una excepcion crhaseando el servidor
+                throw new Error("No response given in error MiddlewareHandler chain");
               }
 
-              // El ultimo MiddlewareHandler de error debe retornar una respuesta incondicionalmente, de lo contrario se lazaremos una excepcion crhaseando el servidor
-              throw new Error("No response given in error MiddlewareHandler chain");
+              // Steps to the next middleware
             }
-
-            // Siguiente MiddlewareHandler / endpoint EndpointHandler 
-            continue;
           }
-
-          // EndpointHandler binder response
-          const res_generator = binder.req_handlers[method];
-          if (typeof res_generator == "function") {
-            return res_generator(req);
-          }
-          return res_generator; // Static response
         }
 
         const not_found_res = Response.json({ error: "not found" }, { status: 404 });
