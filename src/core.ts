@@ -137,7 +137,8 @@ export class Server {
         options.binders_arr.unshift({
           path: options.path,
           method_handlers: create_binder_handlers()
-        })
+        });
+        (options.binders_arr[bindex] as Binder<EndpointHandler>).method_handlers[options.method] = options.response;
       }
       // In case options.binders_arr breaks constraint 1. then will be ignored (we have taken care in above middleware options parameter if statement)
     } else {
