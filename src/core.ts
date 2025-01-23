@@ -47,8 +47,8 @@ type BindOptions<T extends HandlerLike> =
 function is_endpoint_binder<T extends Binder<HandlerLike>>(binder: T): binder is Extract<T, Binder<EndpointHandler>> {
   return typeof (binder as Extract<T, Binder<EndpointHandler>>).method_handlers != "undefined";
 }
-function is_middleware_binder<T extends Binder<HandlerLike>>(binder: T): binder is Extract<T, Binder<MiddlewareHandler>> {
-  return typeof (binder as Extract<T, Binder<MiddlewareHandler>>).middleware_handler != "undefined";
+function is_middleware_binder<T extends Binder<HandlerLike>>(binder: T): binder is Extract<T, Binder<MiddlewareHandler>>{
+	return typeof (binder as Extract<T, Binder<MiddlewareHandler>>).middleware_handler != "undefined";
 }
 
 function is_endpoint_bind_options<T extends BindOptions<HandlerLike>>(bind_options: T): bind_options is Extract<T, BindOptions<EndpointHandler>> {
@@ -59,10 +59,12 @@ function is_middleware_bind_options<T extends BindOptions<HandlerLike>>(bind_opt
 }
 
 function is_endpoint_method(supposted_method: string): supposted_method is EndpointMethod {
-  let includes = false;
   for (const method_name of endpoint_methods)
-    includes = method_name == supposted_method;
-  return includes;
+  { 
+	if (method_name == supposted_method)
+		return true;
+  }
+  return false;
 }
 
 function is_middleware_next_return(middleware_return: GetReturnType<MiddlewareHandler>):
@@ -108,23 +110,16 @@ export class Server {
     }
 
     if (is_middleware_bind_options(options)) {
-      // Creating new middleware binder from scratch
-      if (binder && is_endpoint_binder(binder)) {
-        options.binders_arr.push({
-          path: options.path,
-          middleware_handler: options.response
-        });
-      }
       // Addming new middleware to chain
-      else if (binder && is_middleware_binder(binder)) {
+      if (binder && is_middleware_binder(binder)) {
         options.binders_arr.push({
           path: options.path,
           middleware_handler: options.response
         })
       } // typeof binder != "undefined")
-      else {
-        throw new Error("Cannot bind a middleware handler whose path isn't associated with an endpoint handler binder first");
-      }
+      else if (binder && is_endpoint_binder(binder)) {
+        throw new Error("Middleware must be defined before any endpoint handler");
+      } 
     } else if (is_endpoint_bind_options(options)) {
       // Overrides current handler for the specified method
       if (binder && is_endpoint_binder(binder)) {
@@ -197,14 +192,18 @@ export class Server {
         const request_url = new URL(req.url);
         const request_path = request_url.pathname;
 
-        if (!is_endpoint_method(req.method))
+        if (!is_endpoint_method(req.method.toLowerCase()))
           return Response.json({ error: "Unrecognized method" }, { status: 400 });
-        const request_method = req.method;
+        const request_method = req.method.toLowerCase() as EndpointMethod;
 
-        /* Catches the first ocurrence of an endpoint binder that mathes the path with the req */
-        let bindex = 0;
-        while (bindex < binders.length && !is_endpoint_binder(binders[bindex]) && binders[bindex].path != request_path)
-          bindex++;
+  	/* Grabs the first ocurrence with foreah instead of while loop */
+	let bindex = 0;
+  	binders.forEach((binder, index)=> {
+		if (is_endpoint_binder(binder) && binder.path == request_path)			
+			bindex = index;
+		else if (index + 1 >= binders.length)
+			bindex = binders.length;
+	})
 
         /* Just if no endpoint binder is defined over that path */
         if (bindex >= binders.length) {
@@ -216,7 +215,9 @@ export class Server {
         const response = (binders[bindex] as Binder<EndpointHandler>).method_handlers[request_method];
 
         /* The binders loops begins with the first aparition of the path-matching binder. */
-        for (--bindex; bindex < binders.length; bindex++) {
+	if (--bindex < 0)
+		bindex = 0;
+        for (; bindex < binders.length; bindex++) {
           const binder = binders[bindex];
 
           if (is_middleware_binder(binder)) {
@@ -230,6 +231,9 @@ export class Server {
             */
 
             // TODO: Crear mecanismo de acceso a la pila de errores desde los middleware
+
+            // TODO: No llega a ejecutar el mid nunca
+            console.log("Ejecuto el middleware");
 
             const res = middleware_handler(req, function next(message) {
               if (message && message.trim())
