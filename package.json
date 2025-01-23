@@ -12,7 +12,6 @@
   "license": "ISC",
   "scripts": {
     "node16": "bunx tsc -p ./tsconfig.json && cp ./src/index.d.ts ./@types",
-    "_cjs": "exit 1 && npx tsc -p ./tsconfig-cjs.json && cp ./src/index.d.ts ./@types",
     "start": "bun run ./dist/node16/core.js",
     "init-tsconfig": "pnpx tsc --init"
   },

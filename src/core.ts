@@ -1,7 +1,5 @@
 /* Generic and global type utilities */
 
-import { readdirSync } from "fs";
-
 /// @brief Infers return type from function / method
 type GetReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
 
@@ -112,14 +110,14 @@ export class Server {
     if (is_middleware_bind_options(options)) {
       // Creating new middleware binder from scratch
       if (binder && is_endpoint_binder(binder)) {
-        options.binders_arr.unshift({
+        options.binders_arr.push({
           path: options.path,
           middleware_handler: options.response
         });
       }
       // Addming new middleware to chain
       else if (binder && is_middleware_binder(binder)) {
-        options.binders_arr.unshift({
+        options.binders_arr.push({
           path: options.path,
           middleware_handler: options.response
         })
@@ -134,7 +132,7 @@ export class Server {
       }
       // Creates a new endpoint binder from scratch  
       else if (!binder) {
-        options.binders_arr.unshift({
+        options.binders_arr.push({
           path: options.path,
           method_handlers: create_binder_handlers()
         });
@@ -196,29 +194,32 @@ export class Server {
     Bun.serve({
       port,
       fetch(req) {
-        for (const binder of binders) {
-          if (req.url != binder.path)
-            continue;
+        const request_url = new URL(req.url);
+        const request_path = request_url.pathname;
 
-          /*
-            El metodo fetch finaliza en el momento en el que se retorna una respuesta en el metodo fetch. Esto puede suceder en:
-              1. Secuencia de MiddlewareHandler
-              2. Secuencia de MiddlewareHandler de error (en caso de error en MiddlewareHandler)
-              3. Tras finalizar la secuencia de MiddlewareHandler, en el binder EndpointHandler
-          */
-          if (is_endpoint_binder(binder)) {
-            /* Method verification is important since it could be unrecognized or not supported */
-            if (!is_endpoint_method(req.method)) {
-              return Response.json({ error: "Unrecognized method" }, { status: 400 })
-            }
+        if (!is_endpoint_method(req.method))
+          return Response.json({ error: "Unrecognized method" }, { status: 400 });
+        const request_method = req.method;
 
-            // EndpointHandler binder response
-            const response = binder.method_handlers[req.method];
-            if (typeof response == "function")
-              return response(req);
-            return response;
-          }
-          else {
+        /* Catches the first ocurrence of an endpoint binder that mathes the path with the req */
+        let bindex = 0;
+        while (bindex < binders.length && !is_endpoint_binder(binders[bindex]) && binders[bindex].path != request_path)
+          bindex++;
+
+        /* Just if no endpoint binder is defined over that path */
+        if (bindex >= binders.length) {
+          const not_found_res = Response.json({ error: "404 / not-found" }, { status: 404 });
+          return not_found_res;
+        }
+
+        /* Configures the response to be sent after middleware execution */
+        const response = (binders[bindex] as Binder<EndpointHandler>).method_handlers[request_method];
+
+        /* The binders loops begins with the first aparition of the path-matching binder. */
+        for (--bindex; bindex < binders.length; bindex++) {
+          const binder = binders[bindex];
+
+          if (is_middleware_binder(binder)) {
             const { middleware_handler } = binder;
             const error_stack: string[] = [];
             /*
@@ -239,36 +240,35 @@ export class Server {
 
             if (!is_middleware_next_return(res))
               return res;
-            else {
-              if (res.error_stack_piece) // Carga los MiddlewareHandler de error
-              {
-                for (const error_binder of error_binders) {
-                  const { middleware_handler } = error_binder;
-                  const error_res = middleware_handler(req, function next(message = "") {
-                    if (message.trim()) {
-                      return { error_stack_piece: message };
-                    }
-                    return { error_stack_piece: null };
-                  });
-
-                  if (!is_middleware_next_return(error_res))
-                    return error_res;
-                  else if (res.error_stack_piece) {
-                    error_stack.push(res.error_stack_piece);
+            else if (res.error_stack_piece) // Loads error middleware
+            {
+              for (const error_binder of error_binders) {
+                const { middleware_handler } = error_binder;
+                const error_res = middleware_handler(req, function next(message = "") {
+                  if (message.trim()) {
+                    return { error_stack_piece: message };
                   }
+                  return { error_stack_piece: null };
+                });
+
+                if (!is_middleware_next_return(error_res))
+                  return error_res;
+                else if (res.error_stack_piece) {
+                  error_stack.push(res.error_stack_piece);
                 }
-
-                // El ultimo MiddlewareHandler de error debe retornar una respuesta incondicionalmente, de lo contrario se lazaremos una excepcion crhaseando el servidor
-                throw new Error("No response given in error MiddlewareHandler chain");
               }
-
-              // Steps to the next middleware
+              // El ultimo MiddlewareHandler de error debe retornar una respuesta incondicionalmente, de lo contrario se lazaremos una excepcion crhaseando el servidor
+              throw new Error("No response given in error middleware chain");
             }
+            // Steps over the next middleware
           }
+          // If is endpoint binder, then ignore it.
         }
 
-        const not_found_res = Response.json({ error: "not found" }, { status: 404 });
-        return not_found_res;
+        /* Sends response to client */
+        if (typeof response == "function")
+          return response(req);
+        return response;
       }
     });
 
