@@ -47,8 +47,8 @@ type BindOptions<T extends HandlerLike> =
 function is_endpoint_binder<T extends Binder<HandlerLike>>(binder: T): binder is Extract<T, Binder<EndpointHandler>> {
   return typeof (binder as Extract<T, Binder<EndpointHandler>>).method_handlers != "undefined";
 }
-function is_middleware_binder<T extends Binder<HandlerLike>>(binder: T): binder is Extract<T, Binder<MiddlewareHandler>>{
-	return typeof (binder as Extract<T, Binder<MiddlewareHandler>>).middleware_handler != "undefined";
+function is_middleware_binder<T extends Binder<HandlerLike>>(binder: T): binder is Extract<T, Binder<MiddlewareHandler>> {
+  return typeof (binder as Extract<T, Binder<MiddlewareHandler>>).middleware_handler != "undefined";
 }
 
 function is_endpoint_bind_options<T extends BindOptions<HandlerLike>>(bind_options: T): bind_options is Extract<T, BindOptions<EndpointHandler>> {
@@ -59,10 +59,9 @@ function is_middleware_bind_options<T extends BindOptions<HandlerLike>>(bind_opt
 }
 
 function is_endpoint_method(supposted_method: string): supposted_method is EndpointMethod {
-  for (const method_name of endpoint_methods)
-  { 
-	if (method_name == supposted_method)
-		return true;
+  for (const method_name of endpoint_methods) {
+    if (method_name == supposted_method)
+      return true;
   }
   return false;
 }
@@ -99,10 +98,10 @@ export class Server {
       2. Cannot have two or more EndpointHandler-binders associated with the same path, instead we should only be able to override binder-EndpointHandler method handlers functions if exists (however multiple middlewares may be binded atop the same path)
   */
   private static bind<T extends HandlerLike>(options: BindOptions<T>): Binder<T> | never {
-    // Searches for binding
+    // Searches for latest ocurrence of matching path binder (either it's an endpoint or middleware binder)
     let binder: Binder<HandlerLike> | undefined;
-    let bindex = 0; // Just in case we need to modify the original array
-    for (; bindex < options.binders_arr.length; bindex++) {
+    let bindex = options.binders_arr.length - 1; // Just in case we need to modify the original array
+    for (; bindex >= 0; bindex--) {
       if (options.binders_arr[bindex].path == options.path) {
         binder = options.binders_arr[bindex];
         break;
@@ -110,30 +109,25 @@ export class Server {
     }
 
     if (is_middleware_bind_options(options)) {
+      if (binder && is_endpoint_binder(binder))
+        throw new Error("Middleware must be defined before the path-associated endpoint binder");
+
       // Addming new middleware to chain
-      if (binder && is_middleware_binder(binder)) {
-        options.binders_arr.push({
-          path: options.path,
-          middleware_handler: options.response
-        })
-      } // typeof binder != "undefined")
-      else if (binder && is_endpoint_binder(binder)) {
-        throw new Error("Middleware must be defined before any endpoint handler");
-      } 
+      options.binders_arr.push({
+        path: options.path,
+        middleware_handler: options.response
+      })
     } else if (is_endpoint_bind_options(options)) {
-      // Overrides current handler for the specified method
-      if (binder && is_endpoint_binder(binder)) {
-        (options.binders_arr[bindex] as Binder<EndpointHandler>).method_handlers[options.method] = options.response;
-      }
       // Creates a new endpoint binder from scratch  
-      else if (!binder) {
+      if (!binder || (binder && is_middleware_binder(binder))) {
         options.binders_arr.push({
           path: options.path,
           method_handlers: create_binder_handlers()
         });
-        (options.binders_arr[bindex] as Binder<EndpointHandler>).method_handlers[options.method] = options.response;
+        bindex = options.binders_arr.length - 1;
       }
-      // In case options.binders_arr breaks constraint 1. then will be ignored (we have taken care in above middleware options parameter if statement)
+      // Overrides the correspondig endpoint method handler
+      (options.binders_arr[bindex] as Binder<EndpointHandler>).method_handlers[options.method] = options.response;
     } else {
       throw new Error("Run time bind options type checking failure");
     }
@@ -172,10 +166,10 @@ export class Server {
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
-  public use(path: string, handler: MiddlewareHandler, error?: boolean): Binder<MiddlewareHandler> | never {
+  public use(path: string, handler: MiddlewareHandler, error_middleware: boolean = false): Binder<MiddlewareHandler> | never {
     return Server.bind<MiddlewareHandler>({
       path,
-      binders_arr: error ? this.error_binders : this.binders,
+      binders_arr: error_middleware ? this.error_binders : this.binders,
       response: handler
     })
   }
@@ -186,24 +180,25 @@ export class Server {
     /* Acceso a miembros de clase desde fetch */
     const binders = this.binders;
     const error_binders = this.error_binders;
+
+
+    // console.log(binders);
+
+    // Just prints defined binders in order to verify if they are configured whithin the binders array
     Bun.serve({
       port,
       fetch(req) {
         const request_url = new URL(req.url);
         const request_path = request_url.pathname;
+        const incoming_method = req.method.toLowerCase();
 
-        if (!is_endpoint_method(req.method.toLowerCase()))
+        if (!is_endpoint_method(incoming_method))
           return Response.json({ error: "Unrecognized method" }, { status: 400 });
-        const request_method = req.method.toLowerCase() as EndpointMethod;
+        const request_method = incoming_method;
 
-  	/* Grabs the first ocurrence with foreah instead of while loop */
-	let bindex = 0;
-  	binders.forEach((binder, index)=> {
-		if (is_endpoint_binder(binder) && binder.path == request_path)			
-			bindex = index;
-		else if (index + 1 >= binders.length)
-			bindex = binders.length;
-	})
+        let bindex = 0;
+        while (bindex < binders.length && !(is_endpoint_binder(binders[bindex]) && binders[bindex].path == request_path))
+          bindex++;
 
         /* Just if no endpoint binder is defined over that path */
         if (bindex >= binders.length) {
@@ -215,10 +210,8 @@ export class Server {
         const response = (binders[bindex] as Binder<EndpointHandler>).method_handlers[request_method];
 
         /* The binders loops begins with the first aparition of the path-matching binder. */
-	if (--bindex < 0)
-		bindex = 0;
-        for (; bindex < binders.length; bindex++) {
-          const binder = binders[bindex];
+        for (let each_bindex = 0; each_bindex < bindex; each_bindex++) {
+          const binder = binders[each_bindex];
 
           if (is_middleware_binder(binder)) {
             const { middleware_handler } = binder;
@@ -231,9 +224,6 @@ export class Server {
             */
 
             // TODO: Crear mecanismo de acceso a la pila de errores desde los middleware
-
-            // TODO: No llega a ejecutar el mid nunca
-            console.log("Ejecuto el middleware");
 
             const res = middleware_handler(req, function next(message) {
               if (message && message.trim())
