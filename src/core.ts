@@ -5,17 +5,27 @@ type GetReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
 
 /* Endpoint and MiddlewareHandler related types */
 
-// El tipo any es utilizado para los MiddlewareHandler, puesto que las funciones manejadoras para estos trabajan sobre todos los metodos 
 const endpoint_methods = ["get", "post", "path", "delete"] as const;
 type EndpointMethod = typeof endpoint_methods[number];
 
-// Respuesta final
-type EndpointHandler = (req: Request) => Response;
+// Inter handler (either endpoint or middleware) communication
+type BindContext = {
+  // Internal implementation's shared information across binders
+  readonly error_stack: string[],
 
-/* El MiddlewareHandler puede ceder la ejecucion al resto de midleware (midleware estandar o MiddlewareHandler de errores). De lo contrario retornara una respuseta.  */
-type MiddlewareHandler = (req: Request, next: MiddlewareNext) =>
+  // User's responsability (interface consumers may modify freely this object and should merge BindContextData interface for safe type checking)
+  data: BindContextData,
+}
+// Fancy mergeable interface
+export interface BindContextData { }
+
+// Final response
+export type EndpointHandler = (req: Request, context: BindContext) => Response;
+
+// Middleware
+export type MiddlewareHandler = (req: Request, next: MiddlewareNext, context: BindContext) =>
   Response | GetReturnType<MiddlewareNext>;
-/* El mensaje de error se acumula en la pila de errores para el MiddlewareHandler de errores */
+// Middleware callback
 type MiddlewareNext =
   ((message?: string) => { error_stack_piece: string | null })
 
@@ -79,6 +89,16 @@ function create_binder_handlers(): Record<EndpointMethod, Response> {
   })) as Record<EndpointMethod, Response>; // fromEntries removes type narrowing (compatible string conversion) from EndpointMethod, so assertion is needed
 }
 
+/// @brief Initializes the a new bind context, which means, all internal and user-handled shared information across different binders will be instanciated.
+function create_bind_context(): BindContext {
+  return {
+    error_stack: [],
+    data: {}
+  }
+}
+
+/* Server implementation follows */
+
 export class Server {
   /*
     Asocia paths con endpoint handlers y en ocasiones middlewares. Multiples middlewares para un path pueden ser definidos y estos se ejecutaran en el mismo orden en el que fueron definidos.
@@ -92,11 +112,7 @@ export class Server {
   */
   private error_binders: Binder<MiddlewareHandler>[] = [];
 
-  /*
-    Bind method constraints:
-      1. Cannot bind a MiddlewareHandler whose path isn't associated with a EndpointHandler-binder
-      2. Cannot have two or more EndpointHandler-binders associated with the same path, instead we should only be able to override binder-EndpointHandler method handlers functions if exists (however multiple middlewares may be binded atop the same path)
-  */
+  /// @brief Generic bind method allows new bind entries to be added whithin any binder array
   private static bind<T extends HandlerLike>(options: BindOptions<T>): Binder<T> | never {
     // Searches for latest ocurrence of matching path binder (either it's an endpoint or middleware binder)
     let binder: Binder<HandlerLike> | undefined;
@@ -181,26 +197,28 @@ export class Server {
     const binders = this.binders;
     const error_binders = this.error_binders;
 
-
-    // console.log(binders);
-
     // Just prints defined binders in order to verify if they are configured whithin the binders array
     Bun.serve({
       port,
       fetch(req) {
+        // Incoming informatio
         const request_url = new URL(req.url);
         const request_path = request_url.pathname;
         const incoming_method = req.method.toLowerCase();
-
         if (!is_endpoint_method(incoming_method))
           return Response.json({ error: "Unrecognized method" }, { status: 400 });
         const request_method = incoming_method;
 
+        // Creates the bind context allowing inter binding communication
+        const bind_context = create_bind_context();
+
+        // Looks for the response to be sent to client (after executing middleware)
         let bindex = 0;
         while (bindex < binders.length && !(is_endpoint_binder(binders[bindex]) && binders[bindex].path == request_path))
           bindex++;
 
-        /* Just if no endpoint binder is defined over that path */
+        /* Internal response handling (404 response is just an example) */
+
         if (bindex >= binders.length) {
           const not_found_res = Response.json({ error: "404 / not-found" }, { status: 404 });
           return not_found_res;
@@ -215,7 +233,6 @@ export class Server {
 
           if (is_middleware_binder(binder)) {
             const { middleware_handler } = binder;
-            const error_stack: string[] = [];
             /*
                 Posibilidades de comportamiento para middlware y MiddlewareHandler de errores:
                   1. Retornar respuesta y error = false (No permitido res + error = true ; ignorado)
@@ -223,19 +240,21 @@ export class Server {
                   3. No retornar respuesta y error = true (se ejecutan los mid de error)
             */
 
-            // TODO: Crear mecanismo de acceso a la pila de errores desde los middleware
-
             const res = middleware_handler(req, function next(message) {
               if (message && message.trim())
                 return { error_stack_piece: message }
               else
                 return { error_stack_piece: null };
-            })
+            }, bind_context);
 
             if (!is_middleware_next_return(res))
               return res;
             else if (res.error_stack_piece) // Loads error middleware
             {
+              // Error middleware trigger error_stack_piece should also be pushed
+              bind_context.error_stack.push(res.error_stack_piece);
+
+              // TODO: Solo cargar middleware de error para la ruta asignada
               for (const error_binder of error_binders) {
                 const { middleware_handler } = error_binder;
                 const error_res = middleware_handler(req, function next(message = "") {
@@ -243,12 +262,12 @@ export class Server {
                     return { error_stack_piece: message };
                   }
                   return { error_stack_piece: null };
-                });
+                }, bind_context);
 
                 if (!is_middleware_next_return(error_res))
                   return error_res;
-                else if (res.error_stack_piece) {
-                  error_stack.push(res.error_stack_piece);
+                else if (error_res.error_stack_piece) {
+                  bind_context.error_stack.push(error_res.error_stack_piece);
                 }
               }
               // El ultimo MiddlewareHandler de error debe retornar una respuesta incondicionalmente, de lo contrario se lazaremos una excepcion crhaseando el servidor
@@ -261,7 +280,7 @@ export class Server {
 
         /* Sends response to client */
         if (typeof response == "function")
-          return response(req);
+          return response(req, bind_context);
         return response;
       }
     });
