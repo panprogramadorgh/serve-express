@@ -3,7 +3,7 @@
 /// @brief Infers return type from function / method
 type GetReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
 
-/* Endpoint and MiddlewareHandler related types */
+// Endpoint and MiddlewareHandler related types
 
 const endpoint_methods = ["get", "post", "path", "delete"] as const;
 type EndpointMethod = typeof endpoint_methods[number];
@@ -31,7 +31,7 @@ type MiddlewareNext =
 
 type HandlerLike = EndpointHandler | MiddlewareHandler;
 
-/* Asocia recursos http (paths) con endpoint handlers y middleware */
+// Asocia recursos http (paths) con endpoint handlers y middleware
 type Binder<T extends HandlerLike> =
   (T extends EndpointHandler ?
     {
@@ -192,8 +192,12 @@ export class Server {
 
   // TODO: Finish implementation of remaining methods
 
+  // TODO: Todos los errores logicos lanzados al momento de manejar una peticion deben ser lanzados al momento de configurar el servido y no al momento de captar peticiones
+
+  // FIXME: Arreglar rutas estaticas (al momento de retornar las respuestas, el cuerpo de la respuesta se "consume")
+
   public listen(port: number, callback?: () => void): void {
-    /* Acceso a miembros de clase desde fetch */
+    // Acceso a miembros de clase desde fetch
     const binders = this.binders;
     const error_binders = this.error_binders;
 
@@ -219,6 +223,7 @@ export class Server {
 
         /* Internal response handling (404 response is just an example) */
 
+        // TODO: Desplazar responsabilidad de rutas no definidas al usuario consumidor del modulo
         if (bindex >= binders.length) {
           const not_found_res = Response.json({ error: "404 / not-found" }, { status: 404 });
           return not_found_res;
@@ -227,19 +232,14 @@ export class Server {
         /* Configures the response to be sent after middleware execution */
         const response = (binders[bindex] as Binder<EndpointHandler>).method_handlers[request_method];
 
-        /* The binders loops begins with the first aparition of the path-matching binder. */
+        // Loads standard middleware of requested path
         for (let each_bindex = 0; each_bindex < bindex; each_bindex++) {
           const binder = binders[each_bindex];
+          if (binder.path != request_path)
+            continue;
 
           if (is_middleware_binder(binder)) {
             const { middleware_handler } = binder;
-            /*
-                Posibilidades de comportamiento para middlware y MiddlewareHandler de errores:
-                  1. Retornar respuesta y error = false (No permitido res + error = true ; ignorado)
-                  2. No retornar respuesta y error = false (pasa al sigiente mid)
-                  3. No retornar respuesta y error = true (se ejecutan los mid de error)
-            */
-
             const res = middleware_handler(req, function next(message) {
               if (message && message.trim())
                 return { error_stack_piece: message }
@@ -249,13 +249,15 @@ export class Server {
 
             if (!is_middleware_next_return(res))
               return res;
-            else if (res.error_stack_piece) // Loads error middleware
-            {
+            else if (res.error_stack_piece) { // Setps over error middleware
               // Error middleware trigger error_stack_piece should also be pushed
               bind_context.error_stack.push(res.error_stack_piece);
 
-              // TODO: Solo cargar middleware de error para la ruta asignada
+              // Loads error middleware for the requested path
               for (const error_binder of error_binders) {
+                if (error_binder.path != request_path)
+                  continue;
+
                 const { middleware_handler } = error_binder;
                 const error_res = middleware_handler(req, function next(message = "") {
                   if (message.trim()) {
@@ -269,8 +271,10 @@ export class Server {
                 else if (error_res.error_stack_piece) {
                   bind_context.error_stack.push(error_res.error_stack_piece);
                 }
+                // Continues to the next error middleware without pushing any error to error stack
               }
-              // El ultimo MiddlewareHandler de error debe retornar una respuesta incondicionalmente, de lo contrario se lazaremos una excepcion crhaseando el servidor
+
+              // Last error middleware should send a response
               throw new Error("No response given in error middleware chain");
             }
             // Steps over the next middleware
@@ -278,9 +282,10 @@ export class Server {
           // If is endpoint binder, then ignore it.
         }
 
-        /* Sends response to client */
+        // Sends response to client
         if (typeof response == "function")
           return response(req, bind_context);
+
         return response;
       }
     });
