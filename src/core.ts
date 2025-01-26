@@ -1,4 +1,3 @@
-import { $ } from "bun";
 import { assert } from "node:console";
 
 /* Generic and global type utilities */
@@ -138,13 +137,8 @@ function is_static_binder(binder: unknown): binder is Binder<"endpoint", "static
       return false;
     }
     const handler = (binder.method_handlers as any)[method];
-    if (!(handler instanceof Response))
+    if (!is_response(handler))
       return false;
-    const required_props = ["status", "ok", "headers", "json", "text", "body"];
-    for (const prop of required_props) {
-      if (!(prop in handler))
-        return false;
-    }
   }
 
   return true;
@@ -198,11 +192,24 @@ function is_binding_middleware(bind_options: unknown):
   return typeof bind_options.middleware_handler == "function";
 }
 
+function is_response(response: unknown): response is Response {
+  if (typeof response != "object" || response == null)
+    return false;
+  if (!(response instanceof Response))
+    return false;
+  const required_props = ["status", "ok", "headers", "json", "text", "body"];
+  for (const prop of required_props) {
+    if (!(prop in response))
+      return false;
+  }
+  return true;
+}
+
 function is_middleware_next_return(middleware_return: unknown):
   middleware_return is GetReturnType<MiddlewareNext> {
   if (typeof middleware_return != "object" || middleware_return == null)
     return false;
-  if (middleware_return instanceof Response)
+  if (is_response(middleware_return))
     return false;
   return "error_stack_piece" in middleware_return;
 }
@@ -316,19 +323,22 @@ export class Server {
     }
   }
 
+  // TODO: Implementar assert type predicate
   private setBinderMethod<T extends EndpointBinderLike>(
     binder: T,
     method: EndpointMethod,
     handler: T extends Binder<"endpoint", "static"> ? Response : EndpointHandler): void | never {
-
-    if (is_static_binder(binder) && handler instanceof Response) {
-      binder.method_handlers[method] = handler;
+    if (is_static_binder(binder)) {
+      assert(is_response(handler), "Handler was expected to be a response");
+      binder.method_handlers[method] = handler as Response;
     }
-    else if (!is_static_binder && !(handler instanceof Response)) {
-      binder.method_handlers[method] = handler;
+    else if (is_endpoint_binder(binder)) {
+      assert(!is_response(handler), "Handler was expected to be a endpoint binder handler");
+      binder.method_handlers[method] = handler as EndpointHandler;
     }
     else {
-      throw new Error("Discordance between binder type (static and non-static) and binder handler");
+      const exhaustiveCheck: never = binder;
+      throw new Error("Mismatch in binder type (static or non-static) and binder handler");
     }
   }
 
@@ -337,7 +347,7 @@ export class Server {
     path: string,
     handler: GetHandlerKind<EndpointBinderLike>): void | never {
     // Helps TS to find the sign overload
-    if (handler instanceof Response) {
+    if (is_response(handler)) {
       return this.bind({
         path,
         method: "get",
@@ -356,7 +366,7 @@ export class Server {
     path: string,
     handler: GetHandlerKind<EndpointBinderLike>): void | never {
     // Helps TS to find the sign overload
-    if (handler instanceof Response) {
+    if (is_response(handler)) {
       return this.bind({
         path,
         method: "post",
@@ -375,7 +385,7 @@ export class Server {
     path: string,
     handler: GetHandlerKind<EndpointBinderLike>): void | never {
     // Helps TS to find the sign overload
-    if (handler instanceof Response) {
+    if (is_response(handler)) {
       return this.bind({
         path,
         method: "patch",
