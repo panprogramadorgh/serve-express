@@ -1,3 +1,4 @@
+import { $ } from "bun";
 import { assert } from "node:console";
 
 /* Generic and global type utilities */
@@ -32,7 +33,7 @@ export type EndpointHandler = (req: Request, context: BindContext) => Response;
 
 // Middleware callback
 type MiddlewareNext =
-  ((message?: string) => { error_stack_piece: string | null })
+  ((message?: string) => { error_stack_piece: string | undefined })
 
 // Middleware
 export type MiddlewareHandler = (req: Request, next: MiddlewareNext, context: BindContext) =>
@@ -52,14 +53,16 @@ type BindContext = {
   data: BindContextData,
 }
 
-type BinderKinds = "endpoint" | "middleware";
-type EndpointKinds = "non-static" | "static";
+type BinderKind = "endpoint" | "middleware";
+type EndpointKind = "non-static" | "static";
 
-type EndpointBinder<T extends EndpointKinds> =
+type EndpointBinder<T extends EndpointKind> =
   {
     path: string;
     method_handlers: Record<EndpointMethod, T extends "static" ? Response : EndpointHandler>;
   }
+
+type EndpointBinderLike = EndpointBinder<"static"> | EndpointBinder<"non-static">
 
 type MiddlewareBinder =
   {
@@ -67,21 +70,26 @@ type MiddlewareBinder =
     middleware_handler: MiddlewareHandler;
   }
 
-type Binder<T extends BinderKinds, U extends EndpointKinds = "non-static"> =
+type Binder<T extends BinderKind, U extends EndpointKind = "non-static"> =
   T extends "endpoint" ? EndpointBinder<U> : MiddlewareBinder
 
-type BinderLike = (Binder<"endpoint", "non-static"> | Binder<"endpoint", "static">) | Binder<"middleware">;
+type BinderLike = EndpointBinderLike | Binder<"middleware">;
 
 type BindOptions<T extends BinderLike> =
-  (T extends Binder<"endpoint"> | Binder<"endpoint", "static"> ?
+  (T extends EndpointBinderLike ?
     {
       method: EndpointMethod;
-      handler: T extends Binder<"endpoint", "static"> ? Response : EndpointHandler;
+      handler: GetHandlerKind<T>
     } : {
       handler: MiddlewareHandler
     }) & {
       path: string,
     };
+
+type GetHandlerKind<T extends BinderLike> =
+  T extends EndpointBinderLike ?
+  (T extends Binder<"endpoint", "static"> ? Response : EndpointHandler) :
+  MiddlewareHandler
 
 /* Predicates for easy narrowing */
 
@@ -161,7 +169,7 @@ function is_binding_endpoint(bind_options: unknown):
 }
 
 function is_binding_static(bind_options: unknown):
-  bind_options is BindOptions<Binder<"endpoint">> {
+  bind_options is BindOptions<Binder<"endpoint", "static">> {
 
   if (typeof bind_options != "object" || bind_options == null)
     return false;
@@ -176,6 +184,18 @@ function is_binding_static(bind_options: unknown):
     return false;
 
   return true;
+}
+
+function is_binding_middleware(bind_options: unknown):
+  bind_options is BindOptions<Binder<"middleware">> {
+
+  if (typeof bind_options != "object" || bind_options == null)
+    return false;
+  if (!("path" in bind_options))
+    return false;
+  if (!("middleware_handler" in bind_options))
+    return false;
+  return typeof bind_options.middleware_handler == "function";
 }
 
 function is_middleware_next_return(middleware_return: unknown):
@@ -241,7 +261,7 @@ export class Server {
   private static_endpoint_binders: Binder<"endpoint", "static">[] = [];
 
   /// @brief Generic bind method allows new bind entries to be added whithin any binder array
-  private bind(options: BindOptions<BinderLike>): void | never {
+  public bind<T extends BindOptions<BinderLike>>(options: T): void | never {
     // Searches for latest ocurrence of matching path endpoint endpoint binder (either static or not).
     const last_endpoint_binder = predicative_find(this.binders.toReversed(), is_endpoint_binder, (binder) => binder.path == options.path);
     const last_static_endpoint_binder = this.static_endpoint_binders.find(binder => binder.path == options.path);
@@ -249,35 +269,36 @@ export class Server {
     // In charge of return the final response (either it's satic or not)
     const endpoint_binder = last_endpoint_binder ?? last_static_endpoint_binder;
 
-    // FIXME: TERMINAR
-    if (!is_binding_endpoint(options) && !is_binding_static(options)) {
+    if (is_binding_middleware(options)) {
       assert(!endpoint_binder, "Middleware should be defined before the path-associated endpoint binder")
       this.addBinder({ path: options.path, middleware_handler: options.handler }, false);
-    } else if (is_binding_endpoint(options) && !endpoint_binder && options.handler instanceof Response) {
-      // Crear endpoint binder estatico
-      const new_binder = {
-        path: options.path,
-        method_handlers: create_static_binder_methods()
-      } satisfies BinderLike;
-      this.setBinderMethod(new_binder, options.method, options.handler);
-      this.addBinder(new_binder);
-    } else if (is_binding_endpoint(options) && !endpoint_binder && !(options.handler instanceof Response)) {
-      // Crear endpoint binder no estatico
-      const new_binder = {
-        path: options.path,
-        method_handlers: create_nonstatic_binder_methods()
-      } satisfies BinderLike;
-      this.setBinderMethod(new_binder, options.method, options.handler);
-      this.addBinder(new_binder);
-    } else if (is_binding_endpoint(options) && endpoint_binder) {
-      this.setBinderMethod(endpoint_binder, options.method, options.handler);
+    } else if (is_binding_static(options)) {
+      if (endpoint_binder) {
+        this.setBinderMethod(endpoint_binder, options.method, options.handler);
+      } else {
+        const new_binder = {
+          path: options.path,
+          method_handlers: create_static_binder_methods()
+        } satisfies BinderLike;
+        this.setBinderMethod(new_binder, options.method, options.handler);
+        this.addBinder(new_binder);
+      }
+    } else if (is_binding_endpoint(options)) {
+      if (endpoint_binder) {
+        this.setBinderMethod(endpoint_binder, options.method, options.handler);
+      } else {
+        const new_binder = {
+          path: options.path,
+          method_handlers: create_nonstatic_binder_methods()
+        } satisfies BinderLike;
+        this.setBinderMethod(new_binder, options.method, options.handler);
+        this.addBinder(new_binder);
+      }
     }
     else {
       const exhaustiveCheck: never = options;
       throw new Error(`Runtime bind options type checking: ${JSON.stringify(exhaustiveCheck)}`);
     }
-
-    return (binder as unknown) as Binder<Extract<T, HandlerLike>> | never; // All run time type checkings ensures this assertion to be safety
   }
 
   private addBinder<T extends BinderLike>(binder: T, binder_has_error_middleware: boolean = false): void | never {
@@ -295,10 +316,10 @@ export class Server {
     }
   }
 
-  private setBinderMethod(
-    binder: Binder<"endpoint", "static"> | Binder<"endpoint", "non-static">,
+  private setBinderMethod<T extends EndpointBinderLike>(
+    binder: T,
     method: EndpointMethod,
-    handler: Response | EndpointHandler): void | never {
+    handler: T extends Binder<"endpoint", "static"> ? Response : EndpointHandler): void | never {
 
     if (is_static_binder(binder) && handler instanceof Response) {
       binder.method_handlers[method] = handler;
@@ -312,49 +333,75 @@ export class Server {
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
-  public get(path: string, handler: Response | EndpointHandler): Binder<"endpoint"> | never {
-    return Server.bind<EndpointHandler>({
+  public get(
+    path: string,
+    handler: GetHandlerKind<EndpointBinderLike>): void | never {
+    // Helps TS to find the sign overload
+    if (handler instanceof Response) {
+      return this.bind({
+        path,
+        method: "get",
+        handler
+      });
+    }
+    return this.bind({
       path,
-      binders_arr: this.binders,
       method: "get",
-      response: handler
-    })
+      handler
+    });
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
-  public post(path: string, handler: Response | EndpointHandler): Binder<"endpoint"> | never {
-    return Server.bind<EndpointHandler>({
+  public post(
+    path: string,
+    handler: GetHandlerKind<EndpointBinderLike>): void | never {
+    // Helps TS to find the sign overload
+    if (handler instanceof Response) {
+      return this.bind({
+        path,
+        method: "post",
+        handler
+      });
+    }
+    return this.bind({
       path,
-      binders_arr: this.binders,
       method: "post",
-      response: handler
-    })
+      handler
+    });
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
-  public patch(path: string, handler: Response | EndpointHandler): Binder<"endpoint"> | never {
-    return Server.bind<EndpointHandler>({
+  public patch(
+    path: string,
+    handler: GetHandlerKind<EndpointBinderLike>): void | never {
+    // Helps TS to find the sign overload
+    if (handler instanceof Response) {
+      return this.bind({
+        path,
+        method: "patch",
+        handler
+      });
+    }
+    return this.bind({
       path,
-      binders_arr: this.binders,
-      method: "path",
-      response: handler
-    })
+      method: "patch",
+      handler
+    });
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
-  public use(path: string, handler: MiddlewareHandler, error_middleware: boolean = false): Binder<"middleware"> | never {
-    return Server.bind<MiddlewareHandler>({
+  public use(
+    path: string,
+    handler: GetHandlerKind<MiddlewareBinder>): void | never {
+    return this.bind({
       path,
-      binders_arr: error_middleware ? this.error_middleware_binders : this.binders,
-      response: handler
-    })
+      handler
+    });
   }
 
   // TODO: Finish implementation of remaining methods
 
   // TODO: Todos los errores logicos lanzados al momento de manejar una peticion deben ser lanzados al momento de configurar el servido y no al momento de captar peticiones
-
-  // FIXME: Arreglar rutas estaticas (al momento de retornar las respuestas, el cuerpo de la respuesta se "consume")
 
   public listen(port: number, callback?: () => void): void {
     // Acceso a miembros de clase desde fetch
@@ -373,80 +420,60 @@ export class Server {
           return Response.json({ error: "Unrecognized method" }, { status: 400 });
         const request_method = incoming_method;
 
-        // Creates the bind context allowing inter binding communication
-        const bind_context = create_bind_context();
-
         // Looks for the response to be sent to client (after executing middleware)
-        let bindex = 0;
-        while (bindex < binders.length && !(is_endpoint_binder(binders[bindex]) && binders[bindex].path == request_path))
-          bindex++;
+        let endpoint_binder_index = -1;
+        const endpoint_binder = binders.reduce<EndpointBinderLike | undefined>((acc, binder, index) => {
+          if (!is_middleware_binder(binder) && binder.path == request_path) {
+            endpoint_binder_index = index;
+            return binder;
+          }
+        }, undefined);
+
+        // Creates the handler context allowing inter handler communication
+        const context = create_handler_context();
 
         /* Internal response handling (404 response is just an example) */
 
         // TODO: Desplazar responsabilidad de rutas no definidas al usuario consumidor del modulo
-        if (bindex >= binders.length) {
+        if (!endpoint_binder) {
           const not_found_res = Response.json({ error: "404 / not-found" }, { status: 404 });
           return not_found_res;
         }
 
-        /* Configures the response to be sent after middleware execution */
-        const response = (binders[bindex] as Binder<"endpoint">).method_handlers[request_method];
-
-        // Loads standard middleware of requested path
-        for (let each_bindex = 0; each_bindex < bindex; each_bindex++) {
-          const binder = binders[each_bindex];
-          if (binder.path != request_path)
-            continue;
-
-          if (is_middleware_binder(binder)) {
-            const { middleware_handler } = binder;
-            const res = middleware_handler(req, function next(message) {
-              if (message && message.trim())
-                return { error_stack_piece: message }
-              else
-                return { error_stack_piece: null };
-            }, bind_context);
-
-            if (!is_middleware_next_return(res))
-              return res;
-            else if (res.error_stack_piece) { // Setps over error middleware
-              // Error middleware trigger error_stack_piece should also be pushed
-              bind_context.error_stack.push(res.error_stack_piece);
-
-              // Loads error middleware for the requested path
-              for (const error_binder of error_middleware_binders) {
-                if (error_binder.path != request_path)
-                  continue;
-
-                const { middleware_handler } = error_binder;
-                const error_res = middleware_handler(req, function next(message = "") {
-                  if (message.trim()) {
-                    return { error_stack_piece: message };
-                  }
-                  return { error_stack_piece: null };
-                }, bind_context);
-
-                if (!is_middleware_next_return(error_res))
-                  return error_res;
-                else if (error_res.error_stack_piece) {
-                  bind_context.error_stack.push(error_res.error_stack_piece);
-                }
-                // Continues to the next error middleware without pushing any error to error stack
-              }
-
-              // Last error middleware should send a response
-              throw new Error("No response given in error middleware chain");
+        // Loads middleware
+        predicative_filter(
+          binders.slice(0, endpoint_binder_index),
+          (binder): binder is Binder<"middleware"> => {
+            return binder.path == request_path && is_middleware_binder(binder);
+          })
+          .forEach((binder) => {
+            const response = binder.middleware_handler(req, function next(error_stack_piece) {
+              return { error_stack_piece }
+            }, context);
+            if (!is_middleware_next_return(response))
+              return response;
+            else if (response.error_stack_piece) { // Loads error middleware
+              context.error_stack.push(response.error_stack_piece);
+              predicative_filter(error_middleware_binders, (error_middleware_binder): error_middleware_binder is Binder<"middleware"> => {
+                return error_middleware_binder.path == request_path;
+              })
+                .forEach(error_middleware_binder => {
+                  const error_middleware_response = error_middleware_binder.middleware_handler(req, function next(error_stack_piece) {
+                    return { error_stack_piece };
+                  }, context);
+                  if (!is_middleware_next_return(error_middleware_response))
+                    return response;
+                  if (error_middleware_response.error_stack_piece)
+                    context.error_stack.push(error_middleware_response.error_stack_piece);
+                })
+              throw new Error("Error middleware chain should return a response");
             }
-            // Steps over the next middleware
-          }
-          // If is endpoint binder, then ignore it.
-        }
+          });
 
-        // Sends response to client
-        if (typeof response == "function")
-          return response(req, bind_context);
-
-        return response;
+        // Sends endpoint binder response to the client
+        if (is_static_binder(endpoint_binder))
+          return endpoint_binder.method_handlers[request_method];
+        return endpoint_binder.method_handlers[request_method](req, context);
       }
     });
 
