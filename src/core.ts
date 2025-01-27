@@ -2,10 +2,16 @@ import { assert } from "node:console";
 
 /* Generic and global type utilities */
 
-/// @brief Infers return type from function / method
+/**
+ * Infers return type from function / method
+ */
 type GetReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
 
-/// @brief Generates a filtered copy of an array and narrows it's type
+/**
+ * Generates a filtered copy of an array and narrows it's type
+ * @param array Any array of any type
+ * @param predicate Type predicate callback in charge of fiiltering the array items
+ */
 function predicative_filter<T, U>(
   array: T[],
   predicate: (item: T) => item is Extract<U, T>
@@ -13,7 +19,12 @@ function predicative_filter<T, U>(
   return array.filter(predicate);
 }
 
-/// @brief Generic utility for secure array item finding
+/**
+ * Generic utility for secure type array item finding
+ * @param array Any array of any type
+ * @param predicate Type predicate callback in charge of filtering the array items
+ * @param match Onces whithin the array there is only one type of item, `match` callback is in charge of finding one item across it.
+ */
 function predicative_find<T, U>(
   array: T[],
   predicate: (item: T) => item is Extract<U, T>,
@@ -22,28 +33,51 @@ function predicative_find<T, U>(
   return predicative_filter(array, predicate).find(match);
 }
 
-// Endpoint and MiddlewareHandler related types
+/* Endpoint and MiddlewareHandler related types */
 
 const endpoint_methods = ["get", "post", "patch", "delete"] as const;
 type EndpointMethod = typeof endpoint_methods[number];
 
-// Final response
+/**
+ * Type used inside non-static method_handlers binder
+ */
 export type EndpointHandler = (req: Request, context: BindContext) => Response;
 
-// Middleware callback
+/**
+ * Callback provided in middleware handler binders
+ * @param message When isn't an empty string, will push into the error_stack prop inside the binder context (which is accesible for any kind of binder method). Then the error middleware chain will start executing at the error middleware in head.
+ */
 type MiddlewareNext =
   ((message?: string) => { error_stack_piece: string | undefined })
 
-// Middleware
+/**
+ * Middleware binder handler. We use the same type of callbacks for standard middlewares and error middlewares, since both can the access the error stack inside context as given function parameter.
+ * @param req Represents the incoming http request as a fetch API Response interface
+ * @param next Next callback controls whether we step over the next middleware / final endpoint or we just enter into the error middleware chain
+ */
 export type MiddlewareHandler = (req: Request, next: MiddlewareNext, context: BindContext) =>
   Response | GetReturnType<MiddlewareNext>;
 
-type HandlerLike = EndpointHandler | MiddlewareHandler;
 
-// Fancy mergeable interface
+/**
+ * This fancy mergeable interface allows module consumers determine what will be store across al binders inside the data field of handler context.
+ * ```typescript
+ * declare module "serve-express" {
+ *  interface BindContextData {
+ *    user: {
+ *      uid: string;
+ *      name: string;
+ *      type: "admin" | "standard"
+ *    } 
+ *   }  
+ * }
+ * ```
+ */
 export interface BindContextData { }
 
-// Inter handler (either endpoint or middleware) communication
+/**
+ * Allows inter handler (either endpoint or middleware) communication. Bind context object is common for al handlers and is accesible from the binder method / handler_methos
+ */
 type BindContext = {
   // Internal implementation's shared information across binders
   readonly error_stack: string[],
@@ -52,28 +86,61 @@ type BindContext = {
   data: BindContextData,
 }
 
+/**
+ * Sets whether binder is endpoint or middleware kind
+ */
 type BinderKind = "endpoint" | "middleware";
+
+/**
+ * Sets whether the endpoint binder uses handler endpoint functions or static generated Responses
+ */
 type EndpointKind = "non-static" | "static";
 
+/**
+ * Generic for all kind of endpoint binders
+ */
 type EndpointBinder<T extends EndpointKind> =
   {
     path: string;
     method_handlers: Record<EndpointMethod, T extends "static" ? Response : EndpointHandler>;
   }
 
+/**
+ * Type union for all kind of endpoint binders
+ */
 type EndpointBinderLike = EndpointBinder<"static"> | EndpointBinder<"non-static">
 
+/**
+ * The only possibe middleware binder type
+ */
 type MiddlewareBinder =
   {
     path: string;
     middleware_handler: MiddlewareHandler;
   }
 
+/**
+ * Generic that bundlers all variants of binder type
+ */
 type Binder<T extends BinderKind, U extends EndpointKind = "non-static"> =
   T extends "endpoint" ? EndpointBinder<U> : MiddlewareBinder
 
+/**
+ * Type union of all possible binder type variants
+ */
 type BinderLike = EndpointBinderLike | Binder<"middleware">;
 
+/**
+ * Helps getting the appropiated handler type for all kind of binders
+ */
+type GetHandlerKind<T extends BinderLike> =
+  T extends EndpointBinderLike ?
+  (T extends Binder<"endpoint", "static"> ? Response : EndpointHandler) :
+  MiddlewareHandler
+
+/**
+ * Used as a bind method parameter and privides an easy to use way of setting / addming a new binder to the specific server instance.
+ */
 type BindOptions<T extends BinderLike> =
   (T extends EndpointBinderLike ?
     {
@@ -85,13 +152,13 @@ type BindOptions<T extends BinderLike> =
       path: string,
     };
 
-type GetHandlerKind<T extends BinderLike> =
-  T extends EndpointBinderLike ?
-  (T extends Binder<"endpoint", "static"> ? Response : EndpointHandler) :
-  MiddlewareHandler
-
 /* Predicates for easy narrowing */
 
+/**
+ * Predicates whether if `supposted_method` is whether or not of EndpointMethod type
+ * @param supposted_method Is fully secure passing any type to this parameter
+ * @returns Boolean as a type predicate
+ */
 function is_endpoint_method(supposted_method: unknown): supposted_method is EndpointMethod {
   if (typeof supposted_method != "string")
     return false;
@@ -102,6 +169,11 @@ function is_endpoint_method(supposted_method: unknown): supposted_method is Endp
   return false;
 }
 
+/**
+ * Predicates whether if binder is Binder<"endpoint"> type
+ * @param binder Any variable of any type
+ * @returns Boolean as a type predicate
+ */
 function is_endpoint_binder(binder: unknown): binder is Binder<"endpoint"> {
   if (typeof binder != "object" || binder == null)
     return false;
@@ -112,6 +184,11 @@ function is_endpoint_binder(binder: unknown): binder is Binder<"endpoint"> {
   return typeof binder.method_handlers == "function";
 }
 
+/**
+ * Predicates whether if binder is Binder<"endpoint"> type
+ * @param binder Any variable of any type
+ * @returns Boolean as a type predicate
+ */
 function is_middleware_binder(binder: unknown): binder is Binder<"middleware"> {
   if (typeof binder != "object" || binder == null)
     return false;
@@ -122,6 +199,11 @@ function is_middleware_binder(binder: unknown): binder is Binder<"middleware"> {
   return typeof binder.middleware_handler == "function";
 }
 
+/**
+ * Whether if binder is Binder<"endpoint", "static"> type
+ * @param binder Any variable of any type
+ * @returns Boolean as a type predicate
+ */
 function is_static_binder(binder: unknown): binder is Binder<"endpoint", "static"> {
   if (typeof binder != "object" || binder == null)
     return false;
@@ -131,7 +213,7 @@ function is_static_binder(binder: unknown): binder is Binder<"endpoint", "static
   if (typeof binder.method_handlers != "object" || binder.method_handlers == null)
     return false;
 
-  // Ensures binder uses all methods
+  // Ensures binder uses all methods (and are static responses)
   for (const method of Object.keys(binder.method_handlers)) {
     if (!(method in binder.method_handlers)) {
       return false;
@@ -144,6 +226,11 @@ function is_static_binder(binder: unknown): binder is Binder<"endpoint", "static
   return true;
 }
 
+/**
+ * Predicates whether if bind_options argument is BindOptions<Binder<"endpoint">> type
+ * @param bind_options Any variable of any type
+ * @returns Boolean as a type predicate
+ */
 function is_binding_endpoint(bind_options: unknown):
   bind_options is BindOptions<Binder<"endpoint">> {
 
@@ -162,6 +249,11 @@ function is_binding_endpoint(bind_options: unknown):
   return true;
 }
 
+/**
+ * Predicates whether if bind_options argument is BindOptions<Binder<"endpoint", "static">> type
+ * @param bind_options  Any varible of any type
+ * @returns 
+ */
 function is_binding_static(bind_options: unknown):
   bind_options is BindOptions<Binder<"endpoint", "static">> {
 
@@ -180,6 +272,11 @@ function is_binding_static(bind_options: unknown):
   return true;
 }
 
+/**
+ * Predicates whether if bind_options is BindOptions<Binder<"middleware">>
+ * @param bind_options Any variable of any type
+ * @returns Boolean as a type predicate
+ */
 function is_binding_middleware(bind_options: unknown):
   bind_options is BindOptions<Binder<"middleware">> {
 
@@ -192,6 +289,11 @@ function is_binding_middleware(bind_options: unknown):
   return typeof bind_options.middleware_handler == "function";
 }
 
+/**
+ * Predicates whether if response is a fetch API reponse interface or not
+ * @param response Any variable of any type
+ * @returns Boolean as a type predicate
+ */
 function is_response(response: unknown): response is Response {
   if (typeof response != "object" || response == null)
     return false;
@@ -205,6 +307,11 @@ function is_response(response: unknown): response is Response {
   return true;
 }
 
+/**
+ *  Predicates whether if middleware_return is acctually a value generated by some next callback call 
+ * @param middleware_return Any value of any type
+ * @returns Boolean as a type predicate
+ */
 function is_middleware_next_return(middleware_return: unknown):
   middleware_return is GetReturnType<MiddlewareNext> {
   if (typeof middleware_return != "object" || middleware_return == null)
