@@ -147,9 +147,10 @@ type BindOptions<T extends BinderLike> =
       method: EndpointMethod;
       handler: GetHandlerKind<T>
     } : {
-      handler: MiddlewareHandler
+      is_error_middleware: boolean;
+      handler: MiddlewareHandler;
     }) & {
-      path: string,
+      path: string;
     };
 
 /* Predicates for easy narrowing */
@@ -181,7 +182,47 @@ function is_endpoint_binder(binder: unknown): binder is Binder<"endpoint"> {
     return false;
   if (!("method_handlers" in binder))
     return false;
-  return typeof binder.method_handlers == "function";
+  if (typeof binder.method_handlers != "object" || binder.method_handlers == null)
+    return false;
+
+  // Ensures binder uses all methods (and are static responses)
+  const this_binder_methods = Object.keys(binder.method_handlers);
+  for (const method of endpoint_methods) {
+    if (!(this_binder_methods.includes(method)))
+      return false;
+    const handler = (binder.method_handlers as Record<EndpointMethod, unknown>)[method]
+    if (typeof handler != "function")
+      return false;
+  }
+
+  return true;
+}
+
+/**
+ * Whether if binder is Binder<"endpoint", "static"> type
+ * @param binder Any variable of any type
+ * @returns Boolean as a type predicate
+ */
+function is_static_binder(binder: unknown): binder is Binder<"endpoint", "static"> {
+  if (typeof binder != "object" || binder == null)
+    return false;
+
+  if (!("method_handlers" in binder))
+    return false;
+  if (typeof binder.method_handlers != "object" || binder.method_handlers == null)
+    return false;
+
+  // Ensures binder uses all methods (and are static responses)
+  const this_binder_methods = Object.keys(binder.method_handlers);
+  for (const method of endpoint_methods) {
+    if (!(method in this_binder_methods))
+      return false;
+    const handler = (binder.method_handlers as Record<EndpointMethod, unknown>)[method]
+    if (!is_response(handler))
+      return false;
+  }
+
+  return true;
 }
 
 /**
@@ -200,40 +241,12 @@ function is_middleware_binder(binder: unknown): binder is Binder<"middleware"> {
 }
 
 /**
- * Whether if binder is Binder<"endpoint", "static"> type
- * @param binder Any variable of any type
- * @returns Boolean as a type predicate
- */
-function is_static_binder(binder: unknown): binder is Binder<"endpoint", "static"> {
-  if (typeof binder != "object" || binder == null)
-    return false;
-
-  if (!("method_handlers" in binder))
-    return false;
-  if (typeof binder.method_handlers != "object" || binder.method_handlers == null)
-    return false;
-
-  // Ensures binder uses all methods (and are static responses)
-  for (const method of Object.keys(binder.method_handlers)) {
-    if (!(method in binder.method_handlers)) {
-      return false;
-    }
-    const handler = (binder.method_handlers as any)[method];
-    if (!is_response(handler))
-      return false;
-  }
-
-  return true;
-}
-
-/**
  * Predicates whether if bind_options argument is BindOptions<Binder<"endpoint">> type
  * @param bind_options Any variable of any type
  * @returns Boolean as a type predicate
  */
 function is_binding_endpoint(bind_options: unknown):
   bind_options is BindOptions<Binder<"endpoint">> {
-
   if (typeof bind_options != "object" || bind_options == null)
     return false;
   const required_props = ["path", "method"];
@@ -243,10 +256,7 @@ function is_binding_endpoint(bind_options: unknown):
   }
   if (!("handler" in bind_options))
     return false;
-  if (typeof bind_options.handler != "function")
-    return false;
-
-  return true;
+  return typeof bind_options.handler == "function";
 }
 
 /**
@@ -256,7 +266,6 @@ function is_binding_endpoint(bind_options: unknown):
  */
 function is_binding_static(bind_options: unknown):
   bind_options is BindOptions<Binder<"endpoint", "static">> {
-
   if (typeof bind_options != "object" || bind_options == null)
     return false;
   const required_props = ["path", "method"];
@@ -266,10 +275,7 @@ function is_binding_static(bind_options: unknown):
   }
   if (!("handler" in bind_options))
     return false;
-  if (typeof bind_options.handler == "function")
-    return false;
-
-  return true;
+  return is_response(bind_options.handler);
 }
 
 /**
@@ -279,14 +285,16 @@ function is_binding_static(bind_options: unknown):
  */
 function is_binding_middleware(bind_options: unknown):
   bind_options is BindOptions<Binder<"middleware">> {
-
   if (typeof bind_options != "object" || bind_options == null)
     return false;
-  if (!("path" in bind_options))
+  const required_props = ["path", "is_error_middleware"];
+  for (const prop of required_props) {
+    if (!(prop in bind_options))
+      return false;
+  }
+  if (!("handler" in bind_options))
     return false;
-  if (!("middleware_handler" in bind_options))
-    return false;
-  return typeof bind_options.middleware_handler == "function";
+  return typeof bind_options.handler == "function";
 }
 
 /**
@@ -384,8 +392,9 @@ export class Server {
     const endpoint_binder = last_endpoint_binder ?? last_static_endpoint_binder;
 
     if (is_binding_middleware(options)) {
-      assert(!endpoint_binder, "Middleware should be defined before the path-associated endpoint binder")
-      this.addBinder({ path: options.path, middleware_handler: options.handler }, false);
+      assert(!endpoint_binder || options.is_error_middleware, "Middleware should be defined before the path-associated endpoint binder")
+
+      this.addBinder({ path: options.path, middleware_handler: options.handler }, options.is_error_middleware);
     } else if (is_binding_static(options)) {
       if (endpoint_binder) {
         this.setBinderMethod(endpoint_binder, options.method, options.handler);
@@ -394,6 +403,7 @@ export class Server {
           path: options.path,
           method_handlers: create_static_binder_methods()
         } satisfies BinderLike;
+
         this.setBinderMethod(new_binder, options.method, options.handler);
         this.addBinder(new_binder);
       }
@@ -405,6 +415,7 @@ export class Server {
           path: options.path,
           method_handlers: create_nonstatic_binder_methods()
         } satisfies BinderLike;
+
         this.setBinderMethod(new_binder, options.method, options.handler);
         this.addBinder(new_binder);
       }
@@ -415,18 +426,23 @@ export class Server {
     }
   }
 
-  private addBinder<T extends BinderLike>(binder: T, binder_has_error_middleware: boolean = false): void | never {
-    if (is_endpoint_binder(binder) || is_middleware_binder(binder)) {
-      if (binder_has_error_middleware && is_middleware_binder(binder)) {
-        this.error_middleware_binders.push(binder);
-        return;
-      }
+  private addBinder<T extends BinderLike>(
+    binder: T,
+    binder_has_error_middleware: T extends Binder<"middleware"> ? boolean : false = false
+  ): void | never {
+    if (binder_has_error_middleware && is_middleware_binder(binder)) {
+      this.error_middleware_binders.push(binder);
+    }
+    else if (is_middleware_binder(binder)) {
+      this.binders.push(binder);
+    }
+    else if (is_endpoint_binder(binder)) {
       this.binders.push(binder);
     } else if (is_static_binder(binder)) {
       this.static_endpoint_binders.push(binder);
     } else {
       const exhaustiveCheck: never = binder;
-      throw new Error(`Runtime binder type checking failed: ${exhaustiveCheck}`);
+      throw new Error(`Runtime binder type checking failed: ${JSON.stringify(exhaustiveCheck)}`);
     }
   }
 
@@ -445,7 +461,8 @@ export class Server {
     }
     else {
       const exhaustiveCheck: never = binder;
-      throw new Error("Mismatch in binder type (static or non-static) and binder handler");
+      console.log(exhaustiveCheck);
+      throw new Error(`Mismatch in binder type (static or non-static) and binder handler : ${JSON.stringify(exhaustiveCheck)}`);
     }
   }
 
@@ -509,10 +526,12 @@ export class Server {
   /// @brief Supports static responses system (built atop bun's static responses)
   public use(
     path: string,
-    handler: GetHandlerKind<MiddlewareBinder>): void | never {
+    handler: MiddlewareHandler,
+    is_error_middleware: boolean = false): void | never {
     return this.bind({
       path,
-      handler
+      handler,
+      is_error_middleware
     });
   }
 
@@ -557,35 +576,74 @@ export class Server {
           return not_found_res;
         }
 
-        // Loads middleware
+        // TODO: Mejorar (basicamente inicializa los valores con lo que extraiga de los forEach de los middleware binders) -----------
+        let middleware_response: Response | GetReturnType<MiddlewareNext> | undefined = undefined;
+        let error_middleware_response: Response | GetReturnType<MiddlewareNext> | undefined = undefined;
+        // -----------------------------------------------
+
+        const middleware_chain = predicative_filter(
+          binders.slice(0, endpoint_binder_index),
+          (binder): binder is Binder<"middleware"> => {
+            return binder.path == request_path && is_middleware_binder(binder);
+          })
+        const error_middleware_chain = predicative_filter(error_middleware_binders, (error_middleware_binder): error_middleware_binder is Binder<"middleware"> => {
+          return error_middleware_binder.path == request_path;
+        })
+
+        // TODO: Utilizar enfoque con for of
+        // for (const binder of middleware_chain) { }
+
+        // We filter the binders that are not middleware kind and the ones whos path does not match with request_path
         predicative_filter(
           binders.slice(0, endpoint_binder_index),
           (binder): binder is Binder<"middleware"> => {
             return binder.path == request_path && is_middleware_binder(binder);
           })
+          // We executes all middleware in chain
           .forEach((binder) => {
-            const response = binder.middleware_handler(req, function next(error_stack_piece) {
+            middleware_response = binder.middleware_handler(req, function next(error_stack_piece) {
               return { error_stack_piece }
             }, context);
-            if (!is_middleware_next_return(response))
-              return response;
-            else if (response.error_stack_piece) { // Loads error middleware
-              context.error_stack.push(response.error_stack_piece);
+            if (is_response(middleware_response))
+              return;
+            else if (is_middleware_next_return(middleware_response)) { // Loads error middleware
+              if (!middleware_response.error_stack_piece) return;
+              // We push the trigger next error message to the error stack
+              context.error_stack.push(middleware_response.error_stack_piece);
+
+              // We filter the binders where the path does not match
               predicative_filter(error_middleware_binders, (error_middleware_binder): error_middleware_binder is Binder<"middleware"> => {
                 return error_middleware_binder.path == request_path;
               })
+                // We execute each error binder middleware in chain
                 .forEach(error_middleware_binder => {
-                  const error_middleware_response = error_middleware_binder.middleware_handler(req, function next(error_stack_piece) {
+                  error_middleware_response = error_middleware_binder.middleware_handler(req, function next(error_stack_piece) {
                     return { error_stack_piece };
                   }, context);
-                  if (!is_middleware_next_return(error_middleware_response))
-                    return response;
-                  if (error_middleware_response.error_stack_piece)
+
+                  if (is_response(error_middleware_response))
+                    return;
+                  else if (is_middleware_next_return(error_middleware_response)) {
+                    if (!error_middleware_response.error_stack_piece) return;
                     context.error_stack.push(error_middleware_response.error_stack_piece);
+                  }
+                  else {
+                    const exhaustiveCheck: never = error_middleware_response;
+                    throw new Error(`Error middleware response run time type cheking error : ${JSON.stringify(exhaustiveCheck)}`)
+                  }
                 })
               throw new Error("Error middleware chain should return a response");
+            } else {
+              const exhaustiveCheck: never = middleware_response;
+              throw new Error(`Middleware response run time type checking error : ${JSON.stringify(exhaustiveCheck)}`);
             }
           });
+
+        // If middlewares have returned a response, it is sent to the client
+        if (middleware_response)
+          return middleware_response;
+        else if (error_middleware_response)
+          return error_middleware_response;
 
         // Sends endpoint binder response to the client
         if (is_static_binder(endpoint_binder))
