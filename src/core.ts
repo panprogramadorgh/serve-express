@@ -576,11 +576,6 @@ export class Server {
           return not_found_res;
         }
 
-        // TODO: Mejorar (basicamente inicializa los valores con lo que extraiga de los forEach de los middleware binders) -----------
-        let middleware_response: Response | GetReturnType<MiddlewareNext> | undefined = undefined;
-        let error_middleware_response: Response | GetReturnType<MiddlewareNext> | undefined = undefined;
-        // -----------------------------------------------
-
         const middleware_chain = predicative_filter(
           binders.slice(0, endpoint_binder_index),
           (binder): binder is Binder<"middleware"> => {
@@ -590,60 +585,54 @@ export class Server {
           return error_middleware_binder.path == request_path;
         })
 
-        // TODO: Utilizar enfoque con for of
-        // for (const binder of middleware_chain) { }
+        for (const binder of middleware_chain) {
+          const middleware_response = binder.middleware_handler(
+            req,
+            function next(error_stack_piece) {
+              return { error_stack_piece };
+            },
+            context
+          );
+          if (is_response(middleware_response)) return middleware_response;
+          else if (is_middleware_next_return(middleware_response)) {
+            // Loads error middleware
+            if (!middleware_response.error_stack_piece) continue;
+            // We push the trigger next error message to the error stack
+            context.error_stack.push(middleware_response.error_stack_piece);
 
-        // We filter the binders that are not middleware kind and the ones whos path does not match with request_path
-        predicative_filter(
-          binders.slice(0, endpoint_binder_index),
-          (binder): binder is Binder<"middleware"> => {
-            return binder.path == request_path && is_middleware_binder(binder);
-          })
-          // We executes all middleware in chain
-          .forEach((binder) => {
-            middleware_response = binder.middleware_handler(req, function next(error_stack_piece) {
-              return { error_stack_piece }
-            }, context);
-            if (is_response(middleware_response))
-              return;
-            else if (is_middleware_next_return(middleware_response)) { // Loads error middleware
-              if (!middleware_response.error_stack_piece) return;
-              // We push the trigger next error message to the error stack
-              context.error_stack.push(middleware_response.error_stack_piece);
+            for (const error_middleware_binder of error_middleware_chain) {
+              const error_middleware_response = error_middleware_binder.middleware_handler(
+                req,
+                function next(error_stack_piece) {
+                  return { error_stack_piece };
+                },
+                context
+              );
 
-              // We filter the binders where the path does not match
-              predicative_filter(error_middleware_binders, (error_middleware_binder): error_middleware_binder is Binder<"middleware"> => {
-                return error_middleware_binder.path == request_path;
-              })
-                // We execute each error binder middleware in chain
-                .forEach(error_middleware_binder => {
-                  error_middleware_response = error_middleware_binder.middleware_handler(req, function next(error_stack_piece) {
-                    return { error_stack_piece };
-                  }, context);
-
-                  if (is_response(error_middleware_response))
-                    return;
-                  else if (is_middleware_next_return(error_middleware_response)) {
-                    if (!error_middleware_response.error_stack_piece) return;
-                    context.error_stack.push(error_middleware_response.error_stack_piece);
-                  }
-                  else {
-                    const exhaustiveCheck: never = error_middleware_response;
-                    throw new Error(`Error middleware response run time type cheking error : ${JSON.stringify(exhaustiveCheck)}`)
-                  }
-                })
-              throw new Error("Error middleware chain should return a response");
-            } else {
-              const exhaustiveCheck: never = middleware_response;
-              throw new Error(`Middleware response run time type checking error : ${JSON.stringify(exhaustiveCheck)}`);
+              if (is_response(error_middleware_response))
+                return error_middleware_response;
+              else if (is_middleware_next_return(error_middleware_response)) {
+                if (!error_middleware_response.error_stack_piece) continue;
+                context.error_stack.push(error_middleware_response.error_stack_piece);
+              } else {
+                const exhaustiveCheck: never = error_middleware_response;
+                throw new Error(
+                  `Error middleware response run time type cheking error : ${JSON.stringify(
+                    exhaustiveCheck
+                  )}`
+                );
+              }
             }
-          });
-
-        // If middlewares have returned a response, it is sent to the client
-        if (middleware_response)
-          return middleware_response;
-        else if (error_middleware_response)
-          return error_middleware_response;
+            throw new Error("Error middleware chain should return a response");
+          } else {
+            const exhaustiveCheck: never = middleware_response;
+            throw new Error(
+              `Middleware response run time type checking error : ${JSON.stringify(
+                exhaustiveCheck
+              )}`
+            );
+          }
+        }
 
         // Sends endpoint binder response to the client
         if (is_static_binder(endpoint_binder))
