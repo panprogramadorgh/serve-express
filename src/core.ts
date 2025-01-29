@@ -215,7 +215,7 @@ function is_static_binder(binder: unknown): binder is Binder<"endpoint", "static
   // Ensures binder uses all methods (and are static responses)
   const this_binder_methods = Object.keys(binder.method_handlers);
   for (const method of endpoint_methods) {
-    if (!(method in this_binder_methods))
+    if (!(this_binder_methods.includes(method)))
       return false;
     const handler = (binder.method_handlers as Record<EndpointMethod, unknown>)[method]
     if (!is_response(handler))
@@ -372,7 +372,7 @@ export class Server {
 
     Nota: Para un mismo path, los MiddlewareHandler definidos posteriormente a EndpointHandler binder seran ignorados para evitar http response splitting (esencialmente porque la interfaz de bun trabaja con response on return).
   */
-  private binders: BinderLike[] = [];
+  private binders: (Binder<"endpoint", "non-static"> | Binder<"middleware">)[] = [];
 
   /*
     Binds MiddlewareHandler handlers to specific paths. May contain multiple bindings associated with the same path, just as a chain of MiddlewareHandler that will be executed exacly as we had defined.
@@ -461,7 +461,6 @@ export class Server {
     }
     else {
       const exhaustiveCheck: never = binder;
-      console.log(exhaustiveCheck);
       throw new Error(`Mismatch in binder type (static or non-static) and binder handler : ${JSON.stringify(exhaustiveCheck)}`);
     }
   }
@@ -542,6 +541,7 @@ export class Server {
   public listen(port: number, callback?: () => void): void {
     // Acceso a miembros de clase desde fetch
     const binders = this.binders;
+    const static_binders = this.static_endpoint_binders;
     const error_middleware_binders = this.error_middleware_binders;
 
     // Just prints defined binders in order to verify if they are configured whithin the binders array
@@ -557,8 +557,15 @@ export class Server {
         const request_method = incoming_method;
 
         // Looks for the response to be sent to client (after executing middleware)
+
+        let endpoint_binders: EndpointBinderLike[] =
+          predicative_filter(binders, (binder) => {
+            return is_endpoint_binder(binder);
+          })
+        endpoint_binders = endpoint_binders.concat(static_binders);
+
         let endpoint_binder_index = -1;
-        const endpoint_binder = binders.reduce<EndpointBinderLike | undefined>((acc, binder, index) => {
+        const endpoint_binder = endpoint_binders.reduce<EndpointBinderLike | undefined>((acc, binder, index) => {
           if (!is_middleware_binder(binder) && binder.path == request_path) {
             endpoint_binder_index = index;
             return binder;
