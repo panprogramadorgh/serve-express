@@ -372,28 +372,23 @@ export class Server {
 
     Nota: Para un mismo path, los MiddlewareHandler definidos posteriormente a EndpointHandler binder seran ignorados para evitar http response splitting (esencialmente porque la interfaz de bun trabaja con response on return).
   */
-  private binders: (Binder<"endpoint", "non-static"> | Binder<"middleware">)[] = [];
+  private binders: BinderLike[] = [];
 
   /*
     Binds MiddlewareHandler handlers to specific paths. May contain multiple bindings associated with the same path, just as a chain of MiddlewareHandler that will be executed exacly as we had defined.
   */
   private error_middleware_binders: Binder<"middleware">[] = [];
 
-  /* Binds static endpoint handlers to paths */
-  private static_endpoint_binders: Binder<"endpoint", "static">[] = [];
-
   /// @brief Generic bind method allows new bind entries to be added whithin any binder array
   public bind<T extends BindOptions<BinderLike>>(options: T): void | never {
     // Searches for latest ocurrence of matching path endpoint endpoint binder (either static or not).
     const last_endpoint_binder = predicative_find(this.binders.toReversed(), is_endpoint_binder, (binder) => binder.path == options.path);
-    const last_static_endpoint_binder = this.static_endpoint_binders.find(binder => binder.path == options.path);
-    assert(!(last_endpoint_binder && last_static_endpoint_binder), "Cannot define a static endpoint binder and non-static endpoint binder at the same time");
+    const last_static_endpoint_binder = predicative_find(this.binders.toReversed(), is_static_binder, (binde) => binde.path == options.path);
+    assert(!(last_endpoint_binder && last_static_endpoint_binder), "Cannot define a static endpoint binder and non-static endpoint binder for the same path at the same time");
     // In charge of return the final response (either it's satic or not)
     const endpoint_binder = last_endpoint_binder ?? last_static_endpoint_binder;
 
     if (is_binding_middleware(options)) {
-      assert(!endpoint_binder || options.is_error_middleware, "Middleware should be defined before the path-associated endpoint binder")
-
       this.addBinder({ path: options.path, middleware_handler: options.handler }, options.is_error_middleware);
     } else if (is_binding_static(options)) {
       if (endpoint_binder) {
@@ -436,10 +431,8 @@ export class Server {
     else if (is_middleware_binder(binder)) {
       this.binders.push(binder);
     }
-    else if (is_endpoint_binder(binder)) {
+    else if (is_endpoint_binder(binder) || is_static_binder(binder)) {
       this.binders.push(binder);
-    } else if (is_static_binder(binder)) {
-      this.static_endpoint_binders.push(binder);
     } else {
       const exhaustiveCheck: never = binder;
       throw new Error(`Runtime binder type checking failed: ${JSON.stringify(exhaustiveCheck)}`);
@@ -538,10 +531,65 @@ export class Server {
 
   // TODO: Todos los errores logicos lanzados al momento de manejar una peticion deben ser lanzados al momento de configurar el servido y no al momento de captar peticiones
 
+  private static executeMiddlewareChain(options: {
+    req: Request;
+    context: BindContext;
+    middleware_chain: Binder<"middleware">[];
+    error_middleware_chain: Binder<"middleware">[];
+  }): Response | undefined {
+    for (const binder of options.middleware_chain) {
+      const middleware_response = binder.middleware_handler(
+        options.req,
+        function next(error_stack_piece) {
+          return { error_stack_piece };
+        },
+        options.context);
+
+      if (is_response(middleware_response)) return middleware_response;
+      else if (is_middleware_next_return(middleware_response)) {
+        // Loads error middleware
+        if (!middleware_response.error_stack_piece) continue;
+        // We push the trigger next error message to the error stack
+        options.context.error_stack.push(middleware_response.error_stack_piece);
+
+        for (const error_middleware_binder of options.error_middleware_chain) {
+          const error_middleware_response = error_middleware_binder.middleware_handler(
+            options.req,
+            function next(error_stack_piece) {
+              return { error_stack_piece };
+            },
+            options.context
+          );
+
+          if (is_response(error_middleware_response))
+            return error_middleware_response;
+          else if (is_middleware_next_return(error_middleware_response)) {
+            if (!error_middleware_response.error_stack_piece) continue;
+            options.context.error_stack.push(error_middleware_response.error_stack_piece);
+          } else {
+            const exhaustiveCheck: never = error_middleware_response;
+            throw new Error(
+              `Error middleware response run time type cheking error : ${JSON.stringify(
+                exhaustiveCheck
+              )}`
+            );
+          }
+        }
+        throw new Error("Error middleware chain should return a response");
+      } else {
+        const exhaustiveCheck: never = middleware_response;
+        throw new Error(
+          `Middleware response run time type checking error : ${JSON.stringify(
+            exhaustiveCheck
+          )}`
+        );
+      }
+    }
+  }
+
   public listen(port: number, callback?: () => void): void {
     // Acceso a miembros de clase desde fetch
     const binders = this.binders;
-    const static_binders = this.static_endpoint_binders;
     const error_middleware_binders = this.error_middleware_binders;
 
     // Just prints defined binders in order to verify if they are configured whithin the binders array
@@ -552,99 +600,67 @@ export class Server {
         const request_url = new URL(req.url);
         const request_path = request_url.pathname;
         const incoming_method = req.method.toLowerCase();
+
+        // TODO: Delegar responsabilidad a post endpoint middleware
         if (!is_endpoint_method(incoming_method))
           return Response.json({ error: "Unrecognized method" }, { status: 400 });
         const request_method = incoming_method;
 
-        // Looks for the response to be sent to client (after executing middleware)
-
-        let endpoint_binders: EndpointBinderLike[] =
-          predicative_filter(binders, (binder) => {
-            return is_endpoint_binder(binder);
-          })
-        endpoint_binders = endpoint_binders.concat(static_binders);
+        // Creates the handler context allowing inter handler communication
+        const context = create_handler_context();
 
         let endpoint_binder_index = -1;
-        const endpoint_binder = endpoint_binders.reduce<EndpointBinderLike | undefined>((acc, binder, index) => {
-          if (!is_middleware_binder(binder) && binder.path == request_path) {
+        const endpoint_binder = binders.reduce<EndpointBinderLike | undefined>((_acc, binder, index) => {
+          if (binder.path == request_path && (is_endpoint_binder(binder) || is_static_binder(binder))) {
             endpoint_binder_index = index;
             return binder;
           }
         }, undefined);
 
-        // Creates the handler context allowing inter handler communication
-        const context = create_handler_context();
-
-        /* Internal response handling (404 response is just an example) */
-
-        // TODO: Desplazar responsabilidad de rutas no definidas al usuario consumidor del modulo
-        if (!endpoint_binder) {
-          const not_found_res = Response.json({ error: "404 / not-found" }, { status: 404 });
-          return not_found_res;
-        }
-
-        const middleware_chain = predicative_filter(
-          binders.slice(0, endpoint_binder_index),
-          (binder): binder is Binder<"middleware"> => {
-            return binder.path == request_path && is_middleware_binder(binder);
-          })
+        // We just select middleware binders whos path matches
         const error_middleware_chain = predicative_filter(error_middleware_binders, (error_middleware_binder): error_middleware_binder is Binder<"middleware"> => {
           return error_middleware_binder.path == request_path;
         })
 
-        for (const binder of middleware_chain) {
-          const middleware_response = binder.middleware_handler(
-            req,
-            function next(error_stack_piece) {
-              return { error_stack_piece };
-            },
-            context
-          );
-          if (is_response(middleware_response)) return middleware_response;
-          else if (is_middleware_next_return(middleware_response)) {
-            // Loads error middleware
-            if (!middleware_response.error_stack_piece) continue;
-            // We push the trigger next error message to the error stack
-            context.error_stack.push(middleware_response.error_stack_piece);
-
-            for (const error_middleware_binder of error_middleware_chain) {
-              const error_middleware_response = error_middleware_binder.middleware_handler(
-                req,
-                function next(error_stack_piece) {
-                  return { error_stack_piece };
-                },
-                context
-              );
-
-              if (is_response(error_middleware_response))
-                return error_middleware_response;
-              else if (is_middleware_next_return(error_middleware_response)) {
-                if (!error_middleware_response.error_stack_piece) continue;
-                context.error_stack.push(error_middleware_response.error_stack_piece);
-              } else {
-                const exhaustiveCheck: never = error_middleware_response;
-                throw new Error(
-                  `Error middleware response run time type cheking error : ${JSON.stringify(
-                    exhaustiveCheck
-                  )}`
-                );
-              }
-            }
-            throw new Error("Error middleware chain should return a response");
-          } else {
-            const exhaustiveCheck: never = middleware_response;
-            throw new Error(
-              `Middleware response run time type checking error : ${JSON.stringify(
-                exhaustiveCheck
-              )}`
-            );
-          }
-        }
+        // We execute previous endpoint middleware in this.binders
+        const prev_middleware_chain = predicative_filter(
+          binders.slice(0, endpoint_binder_index),
+          (binder): binder is Binder<"middleware"> => {
+            return binder.path == request_path && is_middleware_binder(binder);
+          })
+        const prev_middleware_response = Server.executeMiddlewareChain({
+          req, context,
+          middleware_chain: prev_middleware_chain,
+          error_middleware_chain: error_middleware_chain
+        });
+        // We return the response if it exists
+        if (prev_middleware_response)
+          return prev_middleware_response;
 
         // Sends endpoint binder response to the client
         if (is_static_binder(endpoint_binder))
           return endpoint_binder.method_handlers[request_method];
-        return endpoint_binder.method_handlers[request_method](req, context);
+        else if (is_endpoint_binder(endpoint_binder))
+          return endpoint_binder.method_handlers[request_method](req, context);
+
+        // We execute previous endpoint middleware in this.binders
+        const post_middleware_chain = predicative_filter(
+          binders.slice(endpoint_binder_index + 1),
+          (binder): binder is Binder<"middleware"> => {
+            return binder.path == request_path && is_middleware_binder(binder);
+          }
+        )
+        const post_middleware_response = Server.executeMiddlewareChain({
+          req, context,
+          middleware_chain: post_middleware_chain,
+          error_middleware_chain: error_middleware_chain
+        });
+        // We return the response if it exists
+        if (post_middleware_response)
+          return post_middleware_response;
+
+        // No response was given, placeholder error is sent
+        return Response.json({ error: "Client request was not processed correctly by the server" }, { status: 500 });
       }
     });
 
