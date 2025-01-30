@@ -59,7 +59,7 @@ For every error middleware we've define (always keeping in mind what order do we
 	
 We should always keep in mind that atleast one of the error middleware binders we've define should be returning a response, otherwise the server will send a placeholder error response.
 
-[placeholder error response](node_modules/serve-express/imgs/client-response-was-not-processed.png "placeholder error response")
+[placeholder error response](https://github.com/panprogramadorgh/serve-express/blob/main/imgs/client-response-was-not-processed.pngg "placeholder error response")
 
 Just as express behaves, we enter in error middleware chain when calling the next callback funcion with an error as argument (unlike to express, serve-express just admits an string as a right value for next callback).
 
