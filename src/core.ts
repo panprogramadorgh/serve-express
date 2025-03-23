@@ -1,6 +1,8 @@
-import { assert } from "node:console";
+import { AssertionError } from "node:assert";
 
 /* Generic and global type utilities */
+
+export const servexpress_mid = true;
 
 /**
  * Infers return type from function / method
@@ -31,6 +33,37 @@ function predicative_find<T, U>(
   match: (item: U) => boolean
 ) {
   return predicative_filter(array, predicate).find(match);
+}
+
+/**
+ * Allows assertion and type narrowing at the same time 
+ * @param data Any data to predicate
+ * @param predicate Predication logic
+ * @param message Message to print out if `predicate` fails
+ * @returns Boolean as a type predicate
+ * @example
+ * 
+ * 
+  const my_array: [true, false] | [false, true] = [true, false];
+  predicative_assert<[true, false]>(my_array, "Wrong value was provided", (d) => {
+    if (typeof d != "object" || d == null)
+      return false;
+    if (!(d instanceof Array))
+      return false;
+    if (d.length != 2)
+      return false;
+    if (d[0] != true || d[1] != false)
+      return false;
+
+    return true;
+  });
+
+  my_array // [true, false]
+
+ */
+function predicative_assert<T = true>(data: unknown, message: string, predicate: (d: unknown) => d is T = (d): d is T => d == true): asserts data is T {
+  if (!predicate(data))
+    throw new AssertionError({ message });
 }
 
 /* Endpoint and MiddlewareHandler related types */
@@ -384,11 +417,14 @@ export class Server {
     // Searches for latest ocurrence of matching path endpoint endpoint binder (either static or not).
     const last_endpoint_binder = predicative_find(this.binders.toReversed(), is_endpoint_binder, (binder) => binder.path == options.path);
     const last_static_endpoint_binder = predicative_find(this.binders.toReversed(), is_static_binder, (binde) => binde.path == options.path);
-    assert(!(last_endpoint_binder && last_static_endpoint_binder), "Cannot define a static endpoint binder and non-static endpoint binder for the same path at the same time");
+    
+    predicative_assert(!(last_endpoint_binder && last_static_endpoint_binder), "Cannot define a static endpoint binder and non-static endpoint binder for the same path at the same time");
     // In charge of return the final response (either it's satic or not)
     const endpoint_binder = last_endpoint_binder ?? last_static_endpoint_binder;
 
     if (is_binding_middleware(options)) {
+      predicative_assert(!endpoint_binder || options.is_error_middleware == servexpress_mid, "Middleware should be defined before the path-associated endpoint binder")
+
       this.addBinder({ path: options.path, middleware_handler: options.handler }, options.is_error_middleware);
     } else if (is_binding_static(options)) {
       if (endpoint_binder) {
@@ -439,18 +475,22 @@ export class Server {
     }
   }
 
-  // TODO: Implementar assert type predicate
   private setBinderMethod<T extends EndpointBinderLike>(
     binder: T,
     method: EndpointMethod,
     handler: T extends Binder<"endpoint", "static"> ? Response : EndpointHandler): void | never {
     if (is_static_binder(binder)) {
-      assert(is_response(handler), "Handler was expected to be a response");
-      binder.method_handlers[method] = handler as Response;
+      predicative_assert(handler, "Handler was expected to be a response", is_response);
+      binder.method_handlers[method] = handler;
     }
     else if (is_endpoint_binder(binder)) {
-      assert(!is_response(handler), "Handler was expected to be a endpoint binder handler");
-      binder.method_handlers[method] = handler as EndpointHandler;
+      predicative_assert(
+        handler,
+        "Handler was expected to be a endpoint binder handler",
+        (d): d is EndpointHandler => {
+          return !is_response(d);
+        });
+      binder.method_handlers[method] = handler;
     }
     else {
       const exhaustiveCheck: never = binder;
@@ -529,7 +569,7 @@ export class Server {
 
   // TODO: Finish implementation of remaining methods
 
-  // TODO: Todos los errores logicos lanzados al momento de manejar una peticion deben ser lanzados al momento de configurar el servido y no al momento de captar peticiones
+  // TODO: Todos los errores logicos lanzados al momento de manejar una peticion deben ser lanzados al momento de configurar el servidor y no al momento de captar peticiones
 
   private static executeMiddlewareChain(options: {
     req: Request;
