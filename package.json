@@ -1,7 +1,7 @@
 {
   "name": "quickhttp",
-  "version": "1.0.0",
-  "author": "",
+  "version": "1.0.1",
+  "author": "github.com/panprogramadorgh",
   "main": "./dist/node16/core.js",
   "devDependencies": {
     "@types/bun": "^1.1.16",
@@ -9,11 +9,9 @@
   },
   "description": "",
   "keywords": [],
-  "license": "ISC",
+  "license": "MIT",
   "scripts": {
-    "node16": "bunx tsc -p ./tsconfig.json && cp ./src/index.d.ts ./@types",
-    "start": "bun run ./dist/node16/core.js",
-    "init-tsconfig": "pnpx tsc --init"
+    "node16": "bunx tsc -p ./tsconfig.json && cp ./src/index.d.ts ./@types"
   },
   "types": "./@types/index.d.ts"
 }
