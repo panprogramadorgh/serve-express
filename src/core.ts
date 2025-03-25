@@ -68,13 +68,14 @@ function predicative_assert<T = true>(data: unknown, message: string, predicate:
 
 /* Endpoint and MiddlewareHandler related types */
 
+// TODO: Add corresponding Server methods to bind the remaining http methods
 const endpoint_methods = ["get", "post", "patch", "delete"] as const;
 type EndpointMethod = typeof endpoint_methods[number];
 
 /**
  * Type used inside non-static method_handlers binder
  */
-export type EndpointHandler = (req: Request, context: BindContext) => Response;
+type EndpointHandler = (req: Request, context: BindContext) => Response;
 
 /**
  * Callback provided in middleware handler binders
@@ -132,7 +133,7 @@ type EndpointKind = "non-static" | "static";
 /**
  * Generic for all kind of endpoint binders
  */
-type EndpointBinder<T extends EndpointKind> =
+export type EndpointBinder<T extends EndpointKind> =
   {
     path: string;
     method_handlers: Record<EndpointMethod, T extends "static" ? Response : EndpointHandler>;
@@ -141,12 +142,12 @@ type EndpointBinder<T extends EndpointKind> =
 /**
  * Type union for all kind of endpoint binders
  */
-type EndpointBinderLike = EndpointBinder<"static"> | EndpointBinder<"non-static">
+export type EndpointBinderLike = EndpointBinder<"static"> | EndpointBinder<"non-static">
 
 /**
  * The only possibe middleware binder type
  */
-type MiddlewareBinder =
+export type MiddlewareBinder =
   {
     path: string;
     middleware_handler: MiddlewareHandler;
@@ -155,13 +156,13 @@ type MiddlewareBinder =
 /**
  * Generic that bundlers all variants of binder type
  */
-type Binder<T extends BinderKind, U extends EndpointKind = "non-static"> =
+export type Binder<T extends BinderKind, U extends EndpointKind = "non-static"> =
   T extends "endpoint" ? EndpointBinder<U> : MiddlewareBinder
 
 /**
  * Type union of all possible binder type variants
  */
-type BinderLike = EndpointBinderLike | Binder<"middleware">;
+export type BinderLike = EndpointBinderLike | Binder<"middleware">;
 
 /**
  * Helps getting the appropiated handler type for all kind of binders
@@ -203,26 +204,29 @@ function is_endpoint_method(supposted_method: unknown): supposted_method is Endp
   return false;
 }
 
-// TODO: Reimplement BinderLike-derivated type predicates
-
 /**
  * Predicates whether if binder is BinderLike type
  * @param binder Any variable of any type
  * @returns Boolean as a type predicate
  */
 function is_binder(binder: unknown): binder is BinderLike {
-  // FIXME: Fix this type predicate, it isn't working
-
   if (typeof binder != "object" || binder == null)
     return false;
   if (!("path" in binder) || typeof binder.path != "string")
     return false;
 
+  const method_handlers =
+    ("method_handlers" in binder) &&
+    typeof binder.method_handlers == "object" && binder.method_handlers != null &&
+    Object.keys(binder.method_handlers).join("") == endpoint_methods.join("");
+
+  const middleware_handler = ("middleware_handler" in binder) && typeof binder.middleware_handler == "function";
+
   // Exclusive or
-  if (!(("method_handlers" in binder && binder.method_handlers instanceof Array) || ("middleware_handler" in binder && binder.middleware_handler instanceof Array))) {
+  if (!(method_handlers || middleware_handler)) {
     return false;
   }
-  if (("method_handlers" in binder && binder.method_handlers instanceof Array) && ("middleware_handler" in binder && binder.middleware_handler instanceof Array)) {
+  if (method_handlers && middleware_handler) {
     return false;
   }
 
@@ -418,17 +422,38 @@ function create_handler_context(): BindContext {
   }
 }
 
-// TODO: Finish BinderChain implementation. BinderChain eases the access to binders that depends of a specific path. (it's necessary to finish first BinderLike -- and derivated types -- type predicates)
+/**
+ * Eases the access to binders that depends of a specific path.
+ * @example
+ * 
+ * const my_binders = [
+ *  {
+ *    path: "/profile/dashboard",
+ *    method_handlers: {
+ *      get, Response.json({ message: "hello get" }),
+ *      post, Response.json({ message: "hello post" }),
+ *      patch, Response.json({ message: "hello path" }),
+ *      delete, Response.json({ message: "hello delete" }),
+ *    }
+ *  } 
+ * ]
+ * 
+ * const chain = new BinderChain(my_binders);
+ * const valid_binders = chain.get("/profile") // Returns all binders that depend on /profile, such as /profile/dashboard
+ */
+export class BinderChain<T extends BinderLike = BinderLike> {
+  private binders: T[] = [];
 
-export class BinderChain {
-  private binders: BinderLike[] = [];
+  constructor(initial_binders?: T[]) {
+    if (initial_binders) this.binders.push(...initial_binders);
+  }
 
-  public add(binder: BinderLike) {
+  public add(binder: T) {
     this.binders.push(binder);
   }
 
   public get(path: string) {
-    const filtered_binders = predicative_filter(this.binders, (item): item is BinderLike => {
+    const filtered_binders = predicative_filter(this.binders, (item): item is T => {
       if (!is_binder(item))
         return false;
       return item.path.startsWith(path);
@@ -464,7 +489,7 @@ export class Server {
     const endpoint_binder = last_endpoint_binder ?? last_static_endpoint_binder;
 
     if (is_binding_middleware(options)) {
-      // FIXME: No constarints are imposed when setting a middleware handler
+      // TODO: Finish: No constarints are imposed when setting a middleware handler
 
       // predicative_assert(!endpoint_binder || options.is_error_middleware == error_middlware, "Middleware should be defined before the path-associated endpoint binder")
 
@@ -619,10 +644,6 @@ export class Server {
 
   // TODO: Finish implementation of remaining methods
 
-  // private static handleBinderChain()
-
-  // TODO: Todos los errores logicos lanzados al momento de manejar una peticion deben ser lanzados al momento de configurar el servidor y no al momento de captar peticiones
-
   private static executeMiddlewareChain(options: {
     req: Request;
     context: BindContext;
@@ -700,7 +721,7 @@ export class Server {
         const request_path = request_url.pathname;
         const incoming_method = req.method.toLowerCase();
 
-        // TODO: Delegar responsabilidad a post endpoint middleware
+        // TODO: Delegate responsability of 404-responses handling on interface consumers rather the internal server logic
         if (!is_endpoint_method(incoming_method))
           return Response.json({ error: "Unrecognized method" }, { status: 400 });
         const request_method = incoming_method;
