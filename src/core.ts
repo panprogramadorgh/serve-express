@@ -2,7 +2,7 @@ import { AssertionError } from "node:assert";
 
 /* Generic and global type utilities */
 
-export const error_middlware = true;
+export const error_middleware = true;
 
 /**
  * Infers return type from function / method
@@ -117,7 +117,7 @@ type BindContext = {
   readonly error_stack: string[],
 
   /* Dinamically maintained by API consumers, which means the user defined binders write and read data from/to it (e. user's session token). It is also user's responsability to merge BindContextData interface for safe type checking. */
-  data: BindContextData,
+  readonly data: BindContextData,
 }
 
 /**
@@ -186,6 +186,27 @@ type BindOptions<T extends BinderLike> =
     }) & {
       path: string;
     };
+
+/**
+ * Used as handleChain parameter.
+ */
+type HandleChainOptions<T extends BinderChain = BinderChain> = {
+  // The incoming http request
+  req: Request;
+
+  // Shared information across binders
+  context: BindContext;
+
+  // The binder chain where from we take the binders to process the request and return a responses
+  chain: T;
+
+  /**
+   * Sets how we manage `next` callback calls whos message argument is provided.
+   * @type next_chain: We halt binder execution and notice method caller to take the next binder chain on.
+   * @type next_binder: The `next` callback argument (the error message) is still pushed to `context.error_stack` but the method behaves in a manner it continues with the remaining binders until it finds a response or throw an error if there were not.
+   */
+  step_behaviour: "next_chain" | "next_binder" // finish
+}
 
 /* Predicates for easy narrowing */
 
@@ -452,14 +473,26 @@ export class BinderChain<T extends BinderLike = BinderLike> {
     this.binders.push(binder);
   }
 
-  public get(path: string) {
+  public getFiltered(path: string) {
     const filtered_binders = predicative_filter(this.binders, (item): item is T => {
       if (!is_binder(item))
         return false;
-      return item.path.startsWith(path);
+      return (is_middleware_binder(item) && item.path.startsWith(path)) || (is_endpoint_binder(item) && item.path == path);
     });
 
     return filtered_binders;
+  }
+
+  public getTail<U extends T>(path: string = "/", predicate: (item: T) => item is U) {
+    const last_binder = predicative_find(
+      this.binders.toReversed(),
+      (binder): binder is Extract<U, T> => {
+        return predicate(binder);
+      },
+      (binder) => {
+        return binder.path == path;
+      });
+    return last_binder;
   }
 }
 
@@ -471,28 +504,30 @@ export class Server {
 
     Nota: Para un mismo path, los MiddlewareHandler definidos posteriormente a EndpointHandler binder seran ignorados para evitar http response splitting (esencialmente porque la interfaz de bun trabaja con response on return).
   */
-  private binders: BinderLike[] = [];
+  // private binders: BinderLike[] = [];
+  private binders = new BinderChain();
 
   /*
     Binds MiddlewareHandler handlers to specific paths. May contain multiple bindings associated with the same path, just as a chain of MiddlewareHandler that will be executed exacly as we had defined.
   */
-  private error_middleware_binders: Binder<"middleware">[] = [];
+  // private error_middleware_binders: Binder<"middleware">[] = [];
+  private error_middleware_binders = new BinderChain<Binder<"middleware">>();
 
   /// @brief Generic bind method allows new bind entries to be added whithin any binder array
   public bind<T extends BindOptions<BinderLike>>(options: T): void | never {
+    if (is_binding_middleware(options)) {
+      return this.addBinder({ path: options.path, middleware_handler: options.handler }, options.is_error_middleware);
+    }
+
     // Searches for latest ocurrence of matching path endpoint endpoint binder (either static or not).
-    const last_endpoint_binder = predicative_find(this.binders.toReversed(), is_endpoint_binder, (binder) => binder.path == options.path);
-    const last_static_endpoint_binder = predicative_find(this.binders.toReversed(), is_static_binder, (binde) => binde.path == options.path);
+    const last_endpoint_binder = this.binders.getTail(options.path, is_endpoint_binder);
+    const last_static_endpoint_binder = this.binders.getTail(options.path, is_static_binder)
 
     predicative_assert(!(last_static_endpoint_binder && last_endpoint_binder), "Cannot define a static endpoint binder and non-static endpoint binder for the same path");
     // In charge of return the final response (either it's satic or not)
     const endpoint_binder = last_endpoint_binder ?? last_static_endpoint_binder;
 
     if (is_binding_middleware(options)) {
-      // TODO: Finish: No constarints are imposed when setting a middleware handler
-
-      // predicative_assert(!endpoint_binder || options.is_error_middleware == error_middlware, "Middleware should be defined before the path-associated endpoint binder")
-
       this.addBinder({ path: options.path, middleware_handler: options.handler }, options.is_error_middleware);
     }
     // Static endpoint handler binding 
@@ -537,13 +572,13 @@ export class Server {
     binder_has_error_middleware: T extends Binder<"middleware"> ? boolean : false = false
   ): void | never {
     if (binder_has_error_middleware && is_middleware_binder(binder)) {
-      this.error_middleware_binders.push(binder);
+      this.error_middleware_binders.add(binder);
     }
     else if (is_middleware_binder(binder)) {
-      this.binders.push(binder);
+      this.binders.add(binder);
     }
     else if (is_endpoint_binder(binder) || is_static_binder(binder)) {
-      this.binders.push(binder);
+      this.binders.add(binder);
     } else {
       const exhaustiveCheck: never = binder;
       throw new Error(`Runtime binder type checking failed: ${JSON.stringify(exhaustiveCheck)}`);
@@ -644,143 +679,100 @@ export class Server {
 
   // TODO: Finish implementation of remaining methods
 
-  private static executeMiddlewareChain(options: {
-    req: Request;
-    context: BindContext;
-    middleware_chain: Binder<"middleware">[];
-    error_middleware_chain: Binder<"middleware">[];
-  }): Response | undefined {
-    for (const binder of options.middleware_chain) {
-      const middleware_response = binder.middleware_handler(
-        options.req,
-        function next(error_stack_piece) {
-          return { error_stack_piece };
-        },
-        options.context);
+  /**
+   * Executes all binders in `options.chain` looking for http responses. The kind of binders `options.chain` has is controlled by the generic `U extends BinderChain`
+   * @param options 
+   * @returns The response generad by the binder chain or, undefined, if there were not one and thus, there were a middleware binder that made use of `next` callback with some message as argument (whose case next binder chain (AKA error middleware chain) have to take place)
+   * @throws An error is thrown either if no responses are generated or no middleware next callback is used with a message as argument -- the server is wrongly configured and is interface consumer responsability to make proper use of it.
+   */
+  private static handleChain<U extends BinderChain>(options: HandleChainOptions<U>): Response | undefined {
+    const req_url = new URL(options.req.url);
+    const req_method = options.req.method.toLowerCase();
+    if (!is_endpoint_method(req_method))
+      return Response.json({ error: "Unsupported request http method." });
 
-      // Response was returned
-      if (is_response(middleware_response)) return middleware_response;
-      // Next casllback was executed
-      else if (is_middleware_next_return(middleware_response)) {
-        // Steps to the next middleware
-        if (!middleware_response.error_stack_piece) continue;
+    // FIXME: `options.chain` has correctly defined some binders but the filter isn't working as it should
+    const req_path_binders = options.chain.getFiltered(req_url.pathname);
+    console.log(req_path_binders);
 
-        // Loads error middleware
-        options.context.error_stack.push(middleware_response.error_stack_piece);
-        for (const error_middleware_binder of options.error_middleware_chain) {
-          const error_middleware_response = error_middleware_binder.middleware_handler(
-            options.req,
-            function next(error_stack_piece) {
-              return { error_stack_piece };
-            },
-            options.context
-          );
+    for (const binder of req_path_binders) {
+      // Middlewares could either return a response or step over the next binder / binder chain
+      if (is_middleware_binder(binder)) {
+        let next_callback_was_called = false;
+        const mid_return = binder.middleware_handler(options.req, (msg) => {
+          next_callback_was_called = true;
+          // Run time type checking avoids to push invalid data to contexto error messages stack
+          return { error_stack_piece: typeof msg == "string" ? msg : undefined };
+        }, options.context);
 
-          // Response was returned
-          if (is_response(error_middleware_response)) return error_middleware_response;
-          // Next callback was executed
-          else if (is_middleware_next_return(error_middleware_response)) {
-            if (!error_middleware_response.error_stack_piece) continue;
-            options.context.error_stack.push(error_middleware_response.error_stack_piece);
-          }
-          // Runtime and compilation time type check
-          else {
-            const exhaustiveCheck: never = error_middleware_response;
-            throw new Error(
-              `Error middleware response run time type cheking error : ${JSON.stringify(
-                exhaustiveCheck
-              )}`
-            );
-          }
+        if (is_response(mid_return)) {
+          return mid_return;
         }
-        throw new Error("Error middleware chain should return a response");
+        else if (((a): a is GetReturnType<MiddlewareNext> => next_callback_was_called)(mid_return)) {
+          const msg = mid_return.error_stack_piece;
+          if (!msg) continue;
+          options.context.error_stack.push(msg);
+
+          // We inform `handleChain` caller, we should step to next binder chain (if appropiated)
+          if (options.step_behaviour == "next_chain")
+            return;
+        } else {
+          const exhaustiveCheck: never = mid_return;
+          throw new Error(
+            `Middleware response run time type checking error : ${JSON.stringify(
+              exhaustiveCheck
+            )}`
+          );
+        }
+
+        continue;
       }
-      // Runtime and compliation time type check
-      else {
-        const exhaustiveCheck: never = middleware_response;
-        throw new Error(
-          `Middleware response run time type checking error : ${JSON.stringify(
-            exhaustiveCheck
-          )}`
-        );
-      }
+
+      const method_handler = binder.method_handlers[req_method]
+      if (is_response(method_handler))
+        return method_handler;
+
+      const generated_response = method_handler(options.req, options.context);
+      // Just in sake of security we run-time-ensure we've got a response to provide
+      if (is_response(generated_response))
+        return generated_response;
+
+      throw new Error(`Endpoint response run time type checking error : ${JSON.stringify(generated_response)}`);
     }
   }
 
+  /**
+   * After all handlers and middleware (binders) are configured, `listen` raises the http server on `port`.
+   * @param port The http port (i.e 80, 3000 or 8080)
+   * @param callback If neither of the server configuration methods throws an exception (the server is correctly configured), callback is executed.
+   */
   public listen(port: number, callback?: () => void): void {
     // Acceso a miembros de clase desde fetch
-    const binders = this.binders;
-    const error_middleware_binders = this.error_middleware_binders;
+    const { error_middleware_binders, binders } = this;
+    // Creates a brand new context in sake of binder communication
+    const virgin_context = create_handler_context();
 
     // Just prints defined binders in order to verify if they are configured whithin the binders array
     Bun.serve({
       port,
       fetch(req) {
-        // Incoming informatio
-        const request_url = new URL(req.url);
-        const request_path = request_url.pathname;
-        const incoming_method = req.method.toLowerCase();
+        // Copies a blank context
+        const context = { ...virgin_context } satisfies BindContext;
 
-        // TODO: Delegate responsability of 404-responses handling on interface consumers rather the internal server logic
-        if (!is_endpoint_method(incoming_method))
-          return Response.json({ error: "Unrecognized method" }, { status: 400 });
-        const request_method = incoming_method;
-
-        // Creates the handler context allowing inter handler communication
-        const context = create_handler_context();
-
-        let endpoint_binder_index = -1;
-        const endpoint_binder = binders.reduce<EndpointBinderLike | undefined>((_acc, binder, index) => {
-          if (binder.path == request_path && (is_endpoint_binder(binder) || is_static_binder(binder))) {
-            endpoint_binder_index = index;
-            return binder;
-          }
-        }, undefined);
-
-        // We just select middleware binders whos path matches
-        const error_middleware_chain = predicative_filter(error_middleware_binders, (error_middleware_binder): error_middleware_binder is Binder<"middleware"> => {
-          return error_middleware_binder.path == request_path;
+        const main_chain_response = Server.handleChain({
+          req, chain: binders, context, step_behaviour: "next_chain"
         })
+        if (main_chain_response)
+          return main_chain_response;
 
-        // We execute previous endpoint middleware in this.binders
-        const prev_middleware_chain = predicative_filter(
-          binders.slice(0, endpoint_binder_index),
-          (binder): binder is Binder<"middleware"> => {
-            return binder.path == request_path && is_middleware_binder(binder);
-          })
-        const prev_middleware_response = Server.executeMiddlewareChain({
-          req, context,
-          middleware_chain: prev_middleware_chain,
-          error_middleware_chain: error_middleware_chain
-        });
-        // We return the response if it exists
-        if (prev_middleware_response)
-          return prev_middleware_response;
+        const err_mid_chain_response = Server.handleChain({
+          req, chain: error_middleware_binders, context, step_behaviour: "next_binder"
+        })
+        if (err_mid_chain_response)
+          return err_mid_chain_response;
 
-        // Sends endpoint binder response to the client
-        if (is_static_binder(endpoint_binder))
-          return endpoint_binder.method_handlers[request_method];
-        else if (is_endpoint_binder(endpoint_binder))
-          return endpoint_binder.method_handlers[request_method](req, context);
-
-        // We execute previous endpoint middleware in this.binders
-        const post_middleware_chain = predicative_filter(
-          binders.slice(endpoint_binder_index + 1),
-          (binder): binder is Binder<"middleware"> => {
-            return binder.path == request_path && is_middleware_binder(binder);
-          }
-        )
-        const post_middleware_response = Server.executeMiddlewareChain({
-          req, context,
-          middleware_chain: post_middleware_chain,
-          error_middleware_chain: error_middleware_chain
-        });
-        // We return the response if it exists
-        if (post_middleware_response)
-          return post_middleware_response;
-
-        // No response was given, placeholder error is sent
-        return Response.json({ error: "Client request was not processed correctly by the server" }, { status: 500 });
+        console.error(new Error(`Unhandeled http request : ${req.url}`));
+        process.exit(1);
       }
     });
 
