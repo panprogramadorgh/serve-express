@@ -236,10 +236,28 @@ function is_binder(binder: unknown): binder is BinderLike {
   if (!("path" in binder) || typeof binder.path != "string")
     return false;
 
-  const method_handlers =
+  let method_handlers = false;
+
+  if (
     ("method_handlers" in binder) &&
     typeof binder.method_handlers == "object" && binder.method_handlers != null &&
-    Object.keys(binder.method_handlers).join("") == endpoint_methods.join("");
+    Object.keys(binder.method_handlers).join("") == endpoint_methods.join("")
+  ) {
+    const method_handlers_array = Object.values(binder.method_handlers);
+    method_handlers = true;
+
+    // Ensures all method_handlers are the same type (either response or function)
+    const is_static_binder = is_response(method_handlers_array[0]);
+    for (const method_handler of method_handlers_array) {
+      if (
+        (is_static_binder && is_response(method_handler)) ||
+        (!is_static_binder && typeof method_handler == "function")
+      ) continue;
+
+      method_handlers = false;
+      break;
+    }
+  }
 
   const middleware_handler = ("middleware_handler" in binder) && typeof binder.middleware_handler == "function";
 
@@ -272,8 +290,8 @@ function is_endpoint_binder(binder: unknown): binder is Binder<"endpoint"> {
   for (const method of endpoint_methods) {
     if (!(this_binder_methods.includes(method)))
       return false;
-    const handler = (binder.method_handlers as Record<EndpointMethod, unknown>)[method]
-    if (typeof handler != "function")
+    const handler = binder.method_handlers[method];
+    if (!is_response(handler) && typeof handler != "function")
       return false;
   }
 
@@ -477,7 +495,11 @@ export class BinderChain<T extends BinderLike = BinderLike> {
     const filtered_binders = predicative_filter(this.binders, (item): item is T => {
       if (!is_binder(item))
         return false;
-      return (is_middleware_binder(item) && item.path.startsWith(path)) || (is_endpoint_binder(item) && item.path == path);
+      return (
+        (is_middleware_binder(item) && item.path.startsWith(path)) ||  
+        (is_middleware_binder(item) && item.path == "/") ||
+        (is_endpoint_binder(item) && item.path == path)
+      );
     });
 
     return filtered_binders;
@@ -691,9 +713,8 @@ export class Server {
     if (!is_endpoint_method(req_method))
       return Response.json({ error: "Unsupported request http method." });
 
-    // FIXME: `options.chain` has correctly defined some binders but the filter isn't working as it should
+    // FIXME: `options.chain` has correctly defined some binders but the filter isn't working as spected
     const req_path_binders = options.chain.getFiltered(req_url.pathname);
-    console.log(req_path_binders);
 
     for (const binder of req_path_binders) {
       // Middlewares could either return a response or step over the next binder / binder chain
