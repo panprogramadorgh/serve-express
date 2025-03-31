@@ -68,7 +68,6 @@ function predicative_assert<T = true>(data: unknown, message: string, predicate:
 
 /* Endpoint and MiddlewareHandler related types */
 
-// TODO: Add corresponding Server methods to bind the remaining http methods
 const endpoint_methods = ["get", "post", "patch", "delete"] as const;
 type EndpointMethod = typeof endpoint_methods[number];
 
@@ -495,11 +494,11 @@ export class BinderChain<T extends BinderLike = BinderLike> {
     const filtered_binders = predicative_filter(this.binders, (item): item is T => {
       if (!is_binder(item))
         return false;
-      return (
-        (is_middleware_binder(item) && item.path.startsWith(path)) ||  
-        (is_middleware_binder(item) && item.path == "/") ||
-        (is_endpoint_binder(item) && item.path == path)
-      );
+
+      // FIXME: Create complex routing system (currently all lost requests arrive at /)
+      // /profile/*             -> /profile/repos, /profile/config
+      // /404errorless/pages**  -> /404errorless/pages/test, /404errorless/pages/test/othertest
+      return (item.path == "/" && is_middleware_binder(item)) || item.path == path;
     });
 
     return filtered_binders;
@@ -630,6 +629,8 @@ export class Server {
     }
   }
 
+  // TODO: Allow async method_handlers / middleware_handlers
+
   /// @brief Supports static responses system (built atop bun's static responses)
   public get(
     path: string,
@@ -713,7 +714,6 @@ export class Server {
     if (!is_endpoint_method(req_method))
       return Response.json({ error: "Unsupported request http method." });
 
-    // FIXME: `options.chain` has correctly defined some binders but the filter isn't working as spected
     const req_path_binders = options.chain.getFiltered(req_url.pathname);
 
     for (const binder of req_path_binders) {
@@ -777,23 +777,31 @@ export class Server {
     Bun.serve({
       port,
       fetch(req) {
-        // Copies a blank context
-        const context = { ...virgin_context } satisfies BindContext;
+        // Deep copies a blank context
+        const context = structuredClone(virgin_context);
 
-        const main_chain_response = Server.handleChain({
-          req, chain: binders, context, step_behaviour: "next_chain"
-        })
-        if (main_chain_response)
-          return main_chain_response;
+        try {
+          // May lead to run time type checking error
 
-        const err_mid_chain_response = Server.handleChain({
-          req, chain: error_middleware_binders, context, step_behaviour: "next_binder"
-        })
-        if (err_mid_chain_response)
-          return err_mid_chain_response;
+          const main_chain_response = Server.handleChain({
+            req, chain: binders, context, step_behaviour: "next_chain"
+          })
+          if (main_chain_response)
+            return main_chain_response;
 
-        console.error(new Error(`Unhandeled http request : ${req.url}`));
-        process.exit(1);
+          const err_mid_chain_response = Server.handleChain({
+            req, chain: error_middleware_binders, context, step_behaviour: "next_binder"
+          })
+          if (err_mid_chain_response)
+            return err_mid_chain_response;
+
+          throw new Error(`Unhandeled http request : ${req.url}`)
+        } catch (error) {
+          // In either case, the server is wrongly configured and the program have to crash
+
+          console.error(error);
+          process.exit(1);
+        }
       }
     });
 
