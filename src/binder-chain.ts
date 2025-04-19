@@ -2,6 +2,7 @@
  * This module contains a simple interface that stores and manages binders from to which generate http responses
  */
 
+import { dirname, basename } from "node:path"
 import * as predicates from "./predicates"
 import { Internal } from "./definitions"
 
@@ -70,13 +71,31 @@ export default class BinderChain<T extends Internal.Binder = Internal.Binder> {
 
   public getFiltered(path: string) {
     const filtered_binders = predicates.predicative_filter(this.binders, (item): item is T => {
-      if (!predicates.is_binder(item))
+      if (!predicates.is_binder(item)) // Run-type type checking
         return false;
 
-      // TODO: Create complex routing system (currently all lost requests arrive at /)
-      // /profile/*             -> /profile/repos, /profile/config
-      // /404errorless/pages**  -> /404errorless/pages/test, /404errorless/pages/test/othertest
-      return (item.path == "/" && predicates.is_middleware_binder(item)) || item.path == path;
+      // The whole path mathches, no wildcards are needed
+      if (item.path == path)
+        return true;
+
+      // Handles dirname path matching with wildcard '*'
+      if (item.path.endsWith("*") && dirname(item.path) == dirname(path)) {
+        const base = basename(item.path);
+        const path_prefix = base.substring(0, base.indexOf("*"));
+        if (basename(path).startsWith(path_prefix))
+          return true;
+      }
+
+      // Handles nested paths with '**' wildcard
+      const subpath = item.path.substring(0, item.path.indexOf("**"));
+
+      if (subpath.length < 1)
+        return false;
+
+      const subpath_base = basename(subpath);
+      const subpath_prefix = subpath_base.substring(0, subpath_base.indexOf("**"));
+
+      return dirname(path).startsWith(subpath_base) && basename(path).startsWith(subpath_prefix);
     });
 
     return filtered_binders;
