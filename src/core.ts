@@ -2,110 +2,11 @@
  * Provides the api consumer the Server class to configure and quickly raise the http server.
  */
 
-import BinderChain from "./binder-chain" // Response handling interface
-import * as predicates from "./predicates" // Type predicates dedicated module
+import BinderChain from "./binder/binder-chain"
+import * as predicates from "./predicates"
+import * as bindutils from "./binder/binder-utils"
+import { ServerConfigError } from "./errors"
 import { Internal } from "./definitions"
-
-/* ServerBase's bind method utils. */
-namespace BindUtils {
-  /**
-   * Used as a bind method parameter and privides an easy to use way of setting / addming a new binder to the specific server instance.
-   */
-  export type BindOptions<T extends Internal.Binder> =
-    (T extends Internal.EndpointBinder ?
-      {
-        method: Internal.EndpointMethod;
-        handler: Internal.GetHandlerKind<T>
-      } : {
-        is_error_middleware: boolean;
-        handler: MiddlewareHandler;
-      }) & {
-        path: string;
-      };
-
-  /* Bind related utility functions */
-
-  /**
-   * @returns Static endpoint binder method handlers
-   */
-  export function create_static_binder_methods() {
-    const unsupported = Object.freeze(Response.json({ error: "Unsupported method" }, { status: 400 }));
-    return Internal.endpoint_methods.reduce<Record<Internal.EndpointMethod, Response>>((acc, method) => {
-      acc[method] = unsupported;
-      return acc;
-    }, {} as any)
-  }
-
-  /**
-   * @returns Non-static endpoint binder method handlers
-   */
-  export function create_nonstatic_binder_methods() {
-    const unsupported = Object.freeze(() => Response.json({ error: "Unsupported method" }, { status: 400 }));
-    return Internal.endpoint_methods.reduce<Record<Internal.EndpointMethod, EndpointHandler>>((acc, method) => {
-      acc[method] = unsupported;
-      return acc;
-    }, {} as any)
-  }
-
-  /* Bind related type predicates */
-
-  /**
-   * Predicates whether if bind_options argument is BindOptions<Binder<"endpoint">> type
-   * @param bind_options Any variable of any type
-   * @returns Boolean as a type predicate
-   */
-  export function is_binding_endpoint(bind_options: unknown):
-    bind_options is BindOptions<Internal.EndpointBinder<"non-static">> {
-    if (typeof bind_options != "object" || bind_options == null)
-      return false;
-    const required_props = ["path", "method"];
-    for (const prop of required_props) {
-      if (!(prop in bind_options))
-        return false;
-    }
-    if (!("handler" in bind_options))
-      return false;
-    return typeof bind_options.handler == "function";
-  }
-
-  /**
-   * Predicates whether if bind_options argument is BindOptions<Binder<"endpoint", "static">> type
-   * @param bind_options  Any varible of any type
-   * @returns 
-   */
-  export function is_binding_static(bind_options: unknown):
-    bind_options is BindOptions<Internal.EndpointBinder<"static">> {
-    if (typeof bind_options != "object" || bind_options == null)
-      return false;
-    const required_props = ["path", "method"];
-    for (const prop of required_props) {
-      if (!(prop in bind_options))
-        return false;
-    }
-    if (!("handler" in bind_options))
-      return false;
-    return predicates.is_response(bind_options.handler);
-  }
-
-  /**
-   * Predicates whether if bind_options is BindOptions<Binder<"middleware">>
-   * @param bind_options Any variable of any type
-   * @returns Boolean as a type predicate
-   */
-  export function is_binding_middleware(bind_options: unknown):
-    bind_options is BindOptions<Internal.MiddlewareBinder> {
-    if (typeof bind_options != "object" || bind_options == null)
-      return false;
-    const required_props = ["path", "is_error_middleware"];
-    for (const prop of required_props) {
-      if (!(prop in bind_options))
-        return false;
-    }
-    if (!("handler" in bind_options))
-      return false;
-    return typeof bind_options.handler == "function";
-  }
-}
 
 /* ServerBase implementation follows */
 
@@ -115,105 +16,67 @@ namespace BindUtils {
  * - BinderChain handling utilities
  */
 class ServerBase {
-  private binders = new BinderChain();
+  /* server's binder chains */
+  private binders = new BinderChain<Internal.Binder>(); // endpoints + middleware
+  private err_middleware = new BinderChain<Internal.MiddlewareBinder>(); // error middleware
 
-  /*
-    Binds MiddlewareHandler handlers to specific paths. May contain multiple bindings associated with the same path, just as a chain of MiddlewareHandler that will be executed exacly as we had defined.
-  */
-  private error_middleware_binders = new BinderChain<Internal.MiddlewareBinder>();
+  /**
+   * Generic bind method allows new bind entries to be added whithin any their corresponding binder chain 
+   * @param options Configures how will the new binder be.
+   * @returns void
+   * @throws Might throw an excepcion if bad configuration is provided.
+   */
+  public bind(options: bindutils.BindOptions<Internal.Binder>): void | never {
 
-  /// @brief Generic bind method allows new bind entries to be added whithin any binder array
-  public bind<T extends BindUtils.BindOptions<Internal.Binder>>(options: T): void | never {
-    if (BindUtils.is_binding_middleware(options)) {
-      return this.addBinder({ path: options.path, middleware_handler: options.handler }, options.is_error_middleware);
+    // Middleware binder handler binding
+    if (bindutils.is_binding_middleware(options)) {
+      const some_binder = { path: options.path, mid_req_handler: options.req_handler }
+      this.pushNewBinder(some_binder, options.err_mid);
     }
 
-    // Searches for latest ocurrence of matching path endpoint endpoint binder (either static or not).
-    const last_endpoint_binder = this.binders.getTail(options.path, predicates.is_endpoint_binder);
-    const last_static_endpoint_binder = this.binders.getTail(options.path, predicates.is_static_binder)
+    // Endpoint binder handler binding
+    else if (bindutils.is_binding_endpoint(options)) {
+      // Searches for latest ocurrence of matching path endpoint binder (either static or not).
+      const last_nonstatic = this.binders.getTail(options.path, predicates.is_nonstatic_binder);
+      const last_static = this.binders.getTail(options.path, predicates.is_static_binder);
+      const endpoint_binder = last_static ?? last_nonstatic;
 
-    predicates.predicative_assert(!(last_static_endpoint_binder && last_endpoint_binder), "Cannot define a static endpoint binder and non-static endpoint binder for the same path");
-    // In charge of return the final response (either it's satic or not)
-    const endpoint_binder = last_endpoint_binder ?? last_static_endpoint_binder;
-
-    if (BindUtils.is_binding_middleware(options)) {
-      this.addBinder({ path: options.path, middleware_handler: options.handler }, options.is_error_middleware);
+      // Some new binder is created
+      let some_binder = endpoint_binder ?? {
+        path: options.path,
+        req_handlers: bindutils.init_handlers()
+      } satisfies Internal.EndpointBinder;
+      some_binder.req_handlers[options.method] = options.req_handler;
+      if (!endpoint_binder)
+        this.pushNewBinder(some_binder);
     }
-    // Static endpoint handler binding 
-    else if (BindUtils.is_binding_static(options)) {
-      if (endpoint_binder) {
-        Server.setBinderMethod(endpoint_binder, options.method, options.handler);
-      }
-      else {
-        const new_binder = {
-          path: options.path,
-          method_handlers: BindUtils.create_static_binder_methods()
-        } satisfies Internal.Binder;
 
-        Server.setBinderMethod(new_binder, options.method, options.handler);
-        this.addBinder(new_binder);
-      }
-    }
-    // Non-static endpoint handler binding
-    else if (BindUtils.is_binding_endpoint(options)) {
-      if (endpoint_binder) {
-        Server.setBinderMethod(endpoint_binder, options.method, options.handler);
-      }
-      else {
-        const new_binder = {
-          path: options.path,
-          method_handlers: BindUtils.create_nonstatic_binder_methods()
-        } satisfies BinderLike;
-
-        Server.setBinderMethod(new_binder, options.method, options.handler);
-        this.addBinder(new_binder);
-      }
-    }
-    // Runtime and compiling time type checking
+    // Bad configuration were provided as part of `options`
     else {
-      const exhaustiveCheck: never = options;
-      throw new Error(`Runtime bind options type checking: ${JSON.stringify(exhaustiveCheck)}`);
+      throw new ServerConfigError(`Bind method runtime type checking error. Invalid 'options' were provided: ${JSON.stringify(options)}`);
     }
   }
 
-  private addBinder<T extends Internal.Binder>(
+  /**
+   * Given the binder that is provided, it is type narrowed and pushed to its corresponding BinderChain.
+   * @param binder Any type of binder.
+   * @param err_mid_binder Whether binder is an error middleware
+   * @returns void
+   * @throws Might throw an excepcion if an invalid binder is provided as argument.
+   */
+  private pushNewBinder<T extends Internal.Binder>(
     binder: T,
-    binder_has_error_middleware: T extends Internal.MiddlewareBinder ? boolean : false = false
-  ): void | never {
-    if (binder_has_error_middleware && predicates.is_middleware_binder(binder)) {
-      this.error_middleware_binders.add(binder);
-    }
-    else if (predicates.is_middleware_binder(binder)) {
+    err_mid_binder: T extends Internal.MiddlewareBinder ? boolean : false = false
+  ) {
+    if (err_mid_binder && predicates.is_middleware_binder(binder)) {
+      this.err_middleware.add(binder);
+    } else if (predicates.is_middleware_binder(binder)) {
       this.binders.add(binder);
-    }
-    else if (predicates.is_endpoint_binder(binder) || predicates.is_static_binder(binder)) {
-      this.binders.add(binder);
+    } else if (predicates.is_endpoint_binder(binder)) {
+      this.binders.add(binder)
     } else {
       const exhaustiveCheck: never = binder;
-      throw new Error(`Runtime binder type checking failed: ${JSON.stringify(exhaustiveCheck)}`);
-    }
-  }
-
-  private static setBinderMethod<T extends Internal.EndpointBinder>(
-    binder: T,
-    method: Internal.EndpointMethod,
-    handler: T extends Internal.EndpointBinder<"static"> ? Response : EndpointHandler): void | never {
-    if (predicates.is_static_binder(binder)) {
-      predicates.predicative_assert(handler, "Handler was expected to be a response", predicates.is_response);
-      binder.method_handlers[method] = handler;
-    }
-    else if (predicates.is_endpoint_binder(binder)) {
-      predicates.predicative_assert(
-        handler,
-        "Handler was expected to be a endpoint binder handler",
-        (d): d is EndpointHandler => {
-          return !predicates.is_response(d);
-        });
-      binder.method_handlers[method] = handler;
-    }
-    else {
-      const exhaustiveCheck: never = binder;
-      throw new Error(`Mismatch in binder type (static or non-static) and binder handler : ${JSON.stringify(exhaustiveCheck)}`);
+      throw new TypeError(`Cannot push invalid binder: ${JSON.stringify(exhaustiveCheck)}`);
     }
   }
 
@@ -224,28 +87,27 @@ class ServerBase {
    */
   public listen(port: number, callback?: () => void): void {
     // Acceso a miembros de clase desde fetch
-    const { error_middleware_binders, binders } = this;
+    const { binders, err_middleware } = this;
 
-    // Just prints defined binders in order to verify if they are configured whithin the binders array
     Bun.serve({
       port,
       fetch(req) {
         try {
-          // May lead to run time type checking error
+          // May lead to runtime type checking error
 
           const main_chain_response = binders.responseFromChain({
-            req, step_behaviour: "next_chain"
+            req, next_cb_behaviour: "chain_ahead"
           })
           if (main_chain_response)
             return main_chain_response;
 
-          const err_mid_chain_response = error_middleware_binders.responseFromChain({
-            req, step_behaviour: "next_binder"
+          const err_mid_chain_response = err_middleware.responseFromChain({
+            req, next_cb_behaviour: "binder_ahead"
           })
           if (err_mid_chain_response)
             return err_mid_chain_response;
 
-          throw new Error(`Unhandeled http request : ${req.url}`)
+          throw new ServerConfigError(`Unhandeled http request : ${req.url}`)
         } catch (error) {
           // In either case, the server is wrongly configured and the program necessarily have to crash
 
@@ -259,79 +121,118 @@ class ServerBase {
   }
 }
 
-
 export class Server extends ServerBase {
   // TODO: Allow async method_handlers / middleware_handlers
+  // TODO: Document methods and specify wether they throw or not exceptions
 
   /// @brief Supports static responses system (built atop bun's static responses)
   public get(
     path: string,
-    handler: Internal.GetHandlerKind<Internal.EndpointBinder>): void | never {
-    // Helps TS to find the sign overload
-    if (predicates.is_response(handler)) {
-      return this.bind({
-        path,
-        method: "get",
-        handler
-      });
-    }
-
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
     return this.bind({
       path,
       method: "get",
-      handler
+      req_handler
     });
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
   public post(
     path: string,
-    handler: Internal.GetHandlerKind<Internal.EndpointBinder>): void | never {
-    // Helps TS to find the sign overload
-    if (predicates.is_response(handler)) {
-      return this.bind({
-        path,
-        method: "post",
-        handler
-      });
-    }
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
     return this.bind({
       path,
       method: "post",
-      handler
+      req_handler
+    });
+  }
+
+  /// @brief Supports static responses system (built atop bun's static responses)
+  public put(
+    path: string,
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
+    return this.bind({
+      path,
+      method: "put",
+      req_handler
+    });
+  }
+
+  /// @brief Supports static responses system (built atop bun's static responses)
+  public delete(
+    path: string,
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
+    return this.bind({
+      path,
+      method: "delete",
+      req_handler
     });
   }
 
   /// @brief Supports static responses system (built atop bun's static responses)
   public patch(
     path: string,
-    handler: Internal.GetHandlerKind<Internal.EndpointBinder>): void | never {
-    // Helps TS to find the sign overload
-    if (predicates.is_response(handler)) {
-      return this.bind({
-        path,
-        method: "patch",
-        handler
-      });
-    }
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
     return this.bind({
       path,
       method: "patch",
-      handler
+      req_handler
     });
   }
 
-  // TODO: Finish remaining http methods
+  /// @brief Supports static responses system (built atop bun's static responses)
+  public head(
+    path: string,
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
+    return this.bind({
+      path,
+      method: "head",
+      req_handler
+    });
+  }
+
+  /// @brief supports static responses system (built atop bun's static responses)
+  public options(
+    path: string,
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
+    return this.bind({
+      path,
+      method: "options",
+      req_handler
+    });
+  }
+
+  /// @brief supports static responses system (built atop bun's static responses)
+  public trace(
+    path: string,
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
+    return this.bind({
+      path,
+      method: "trace",
+      req_handler
+    });
+  }
+
+  /// @brief supports static responses system (built atop bun's static responses)
+  public connect(
+    path: string,
+    req_handler: Exclude<Internal.GetHandlerKind<Internal.EndpointBinder>, null>): void | never {
+    return this.bind({
+      path,
+      method: "connect",
+      req_handler
+    });
+  }
 
   /// @brief Supports static responses system (built atop bun's static responses)
   public use(
     path: string,
-    handler: MiddlewareHandler,
-    is_error_middleware: boolean = false): void | never {
+    mid_req_handler: MiddlewareHandler,
+    err_mid: boolean = false) {
     return this.bind({
       path,
-      handler,
-      is_error_middleware
+      req_handler: mid_req_handler,
+      err_mid
     });
   }
 }

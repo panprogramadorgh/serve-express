@@ -1,4 +1,4 @@
 dist
-dummy.*
+*dummy.*
 @types
 node_modules

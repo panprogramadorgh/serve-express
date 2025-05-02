@@ -3,33 +3,35 @@
  */
 
 import { dirname, basename } from "node:path"
-import * as predicates from "./predicates"
-import { Internal } from "./definitions"
+import * as predicates from "../predicates"
+import * as errors from "../errors"
+import { Internal } from "../definitions"
 
 // TODO: Write some documentation about the class methods
 
-namespace BinderChainUtils {
+namespace BinderChUtils {
   /**
    * Used as handleChain parameter.
    */
-  export type ResponseFromChainOptions = {
+  export type ResFromCh = {
     // The incoming http request
     req: Request;
 
     /**
      * Sets how we manage `next` callback calls whos message argument is provided.
-     * @type next_chain: We halt binder execution and notice method caller to take the next binder chain on.
-     * @type next_binder: The `next` callback argument (the error message) is still pushed to `context.error_stack` but the method behaves in a manner it continues with the remaining binders until it finds a response or throw an error if there were not.
+     * @type chain_ahead: We halt binder execution and notice method caller to take the next binder chain on.
+     * @type binder_ahead: The `next` callback argument (the error message) is still pushed to `context.error_stack` but the method behaves in a manner it continues with the remaining binders until it finds a response or throw an error if there were not.
      */
-    step_behaviour: "next_chain" | "next_binder" // finish
+    next_cb_behaviour: "chain_ahead" | "binder_ahead"
   }
 
 
   /** 
    * @returns Returns a new handler context, allowing inter handler comunication
    */
-  export function create_bind_context(): Internal.BindContext {
+  export function init_bind_ctx(): Internal.BindContext {
     return {
+      /* Enhance error stack to allow far more complex data types instead of just strings */
       error_stack: [],
 
 
@@ -119,58 +121,60 @@ export default class BinderChain<T extends Internal.Binder = Internal.Binder> {
    * @returns The response generad by the binder chain or, undefined, if there were not one and thus, there were a middleware binder that made use of `next` callback with some message as argument (whose case next binder chain (AKA error middleware chain) have to take place)
    * @throws An error is thrown either if no responses are generated or no middleware next callback is used with a message as argument -- the server is wrongly configured and it's interface-consumer's responsability to make proper use of it.
    */
-  responseFromChain(options: BinderChainUtils.ResponseFromChainOptions): Response | undefined {
+  responseFromChain(options: BinderChUtils.ResFromCh): Response | undefined {
     const req_url = new URL(options.req.url);
     const req_method = options.req.method.toLowerCase();
-    if (!predicates.is_endpoint_method(req_method))
-      return Response.json({ error: "Unsupported request http method." });
 
-    const context = BinderChainUtils.create_bind_context();
+    if (!predicates.is_endpoint_method(req_method))
+      throw new TypeError(`Unsupported request method: ${req_method}`)
+
+    const context = BinderChUtils.init_bind_ctx();
     const req_path_binders = this.getFiltered(req_url.pathname);
 
     for (const binder of req_path_binders) {
+
       // Middlewares could either return a response or step over the next binder / binder chain
       if (predicates.is_middleware_binder(binder)) {
-        let next_callback_was_called = false;
-        const mid_return = binder.middleware_handler(options.req, (msg) => {
-          next_callback_was_called = true;
-          // Run time type checking avoids to push invalid data to contexto error messages stack
+        let cb_was_called = false;
+        const mid_return = binder.mid_req_handler(options.req, (msg) => {
+          cb_was_called = true;
           return { error_stack_piece: typeof msg == "string" ? msg : undefined };
         }, context);
 
         if (predicates.is_response(mid_return)) {
           return mid_return;
         }
-        else if (((a): a is ReturnType<Internal.MiddlewareNext> => next_callback_was_called)(mid_return)) {
+        else if (((a): a is ReturnType<Internal.MiddlewareNext> => cb_was_called)(mid_return)) {
           const msg = mid_return.error_stack_piece;
           if (!msg) continue;
           context.error_stack.push(msg);
 
           // We inform `handleChain` caller, we should step to next binder chain (if appropiated)
-          if (options.step_behaviour == "next_chain")
+          if (options.next_cb_behaviour == "chain_ahead")
             return;
         } else {
           const exhaustiveCheck: never = mid_return;
-          throw new Error(
-            `Middleware response run time type checking error : ${JSON.stringify(
-              exhaustiveCheck
-            )}`
-          );
+          throw new errors.ServerConfigError(`Middleware response runtime type checking error. Middleware did not return response nor call next() callback. Returned from middleware: ${JSON.stringify(exhaustiveCheck)}`);
         }
 
+        // binder_ahead was configured, so it keeps iterating
         continue;
       }
 
-      const method_handler = binder.method_handlers[req_method]
-      if (predicates.is_response(method_handler))
-        return method_handler;
+      const req_handler = binder.req_handlers[req_method]
 
-      const generated_response = method_handler(options.req, context);
-      // Just in sake of security we run-time-ensure we've got a response to provide
+      // If binder does not support the specified method, then keep iterating
+      if (req_handler == null)
+        continue
+
+      // We return the generated resposne from endpoint handler
+      if (predicates.is_response(req_handler))
+        return req_handler;
+      const generated_response = req_handler(options.req, context);
       if (predicates.is_response(generated_response))
         return generated_response;
 
-      throw new Error(`Endpoint response run time type checking error : ${JSON.stringify(generated_response)}`);
+      throw new errors.ServerConfigError(`Endpoint response runtime type checking error. Returned from endpoint: ${JSON.stringify(generated_response)}`)
     }
   }
 }

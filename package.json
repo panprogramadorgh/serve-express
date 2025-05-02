@@ -1,17 +1,17 @@
 {
-  "name": "quickhttp",
+  "name": "serve-express",
   "version": "1.0.1",
   "author": "github.com/panprogramadorgh",
-  "main": "./dist/node16/core.js",
+  "main": "./dist/core.js",
   "devDependencies": {
-    "@types/bun": "^1.1.16",
+    "@types/bun": "1.2.10",
     "@types/node": "^22.10.7"
   },
   "description": "",
   "keywords": [],
   "license": "MIT",
   "scripts": {
-    "node16": "bunx tsc -p ./tsconfig.json && cp ./src/index.d.ts ./@types"
+    "build": "bunx tsc -p ./tsconfig.json && cp ./src/index.d.ts ./src/definitions.d.ts ./@types"
   },
   "types": "./@types/index.d.ts"
 }

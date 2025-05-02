@@ -65,7 +65,7 @@ export function predicative_find<T, U>(
   my_array // [true, false]
 
  */
-export function predicative_assert<T = true>(data: unknown, message: string, predicate: (d: unknown) => d is T = (d): d is T => d == true): asserts data is T {
+export function typed_assert<T = true>(data: unknown, message: string, predicate: (d: unknown) => d is T = (d): d is T => d == true): asserts data is T {
   if (!predicate(data))
     throw new AssertionError({ message });
 }
@@ -98,38 +98,18 @@ export function is_binder(binder: unknown): binder is Internal.Binder {
   if (!("path" in binder) || typeof binder.path != "string")
     return false;
 
-  let method_handlers = false;
+  if ("req_handlers" in binder && typeof binder.req_handlers == "object" && binder.req_handlers != null) {
+    for (const method of Internal.endpoint_methods) {
+      if (!(method in binder.req_handlers))
+        return false;
 
-  // TODO: Improve this type predicate's security. Not only we are basing on the order of a dictionary keys to know wether there are missing methods or not, besides the run time type checkng of the dictionary's values is redundant in its first iteration.
-
-  if (
-    ("method_handlers" in binder) &&
-    typeof binder.method_handlers == "object" && binder.method_handlers != null &&
-    Object.keys(binder.method_handlers).join("") == Internal.endpoint_methods.join("")
-  ) {
-    const method_handlers_array = Object.values(binder.method_handlers);
-    method_handlers = true;
-
-    // Ensures all method_handlers are the same type (either response or function)
-    const is_static_binder = is_response(method_handlers_array[0]);
-    for (const method_handler of method_handlers_array) {
-      if (
-        (is_static_binder && is_response(method_handler)) ||
-        (!is_static_binder && typeof method_handler == "function")
-      ) continue;
-
-      method_handlers = false;
-      break;
+      const req_handler = (binder.req_handlers as any)[method]
+      if (typeof req_handler != "function" && !is_response(req_handler) || req_handler != null)
+        return false;
     }
-  }
-
-  const middleware_handler = ("middleware_handler" in binder) && typeof binder.middleware_handler == "function";
-
-  // Exclusive or
-  if (!(method_handlers || middleware_handler)) {
-    return false;
-  }
-  if (method_handlers && middleware_handler) {
+  } else if ("mid_req_handler" in binder && typeof binder.mid_req_handler == "function") {
+    ;
+  } else {
     return false;
   }
 
@@ -137,25 +117,40 @@ export function is_binder(binder: unknown): binder is Internal.Binder {
 }
 
 /**
- * Predicates whether if binder is Binder<"endpoint"> type
- * @param binder Any variable of any type
- * @returns Boolean as a type predicate
+ * predicates whether if binder is binder<"endpoint"> type
+ * @param binder any variable of any type
+ * @returns boolean as a type predicate
  */
-export function is_endpoint_binder(binder: unknown): binder is Internal.EndpointBinder<"non-static"> {
+export function is_endpoint_binder(binder: unknown): binder is Internal.EndpointBinder {
   if (!is_binder(binder))
     return false;
-  if (!("method_handlers" in binder))
+  if (!("req_handlers" in binder))
     return false;
-  if (typeof binder.method_handlers != "object" || binder.method_handlers == null)
+  if (typeof binder.req_handlers != "object" || binder.req_handlers == null)
     return false;
 
-  // Ensures binder uses all methods (and are static responses)
-  const this_binder_methods = Object.keys(binder.method_handlers);
+  // Ensures binder uses all methods
+  const binder_endp_methods = Object.keys(binder.req_handlers);
   for (const method of Internal.endpoint_methods) {
-    if (!(this_binder_methods.includes(method)))
+    if (!(method in binder_endp_methods))
       return false;
-    const handler = binder.method_handlers[method];
-    if (!is_response(handler) && typeof handler != "function")
+  }
+  return true;
+}
+
+/**
+ * predicates whether if binder is binder<"endpoint"> type
+ * @param binder any variable of any type
+ * @returns boolean as a type predicate
+ */
+export function is_nonstatic_binder(binder: unknown): binder is Internal.EndpointBinder<"non-static"> {
+  if (!is_endpoint_binder(binder))
+    return false;
+
+  // Ensures all request handlers are callbacks instead of responses objects
+  const binder_req_handlers = Object.values(binder.req_handlers);
+  for (const req_handler of binder_req_handlers) {
+    if (typeof req_handler != "function" && req_handler != null)
       return false;
   }
 
@@ -168,20 +163,13 @@ export function is_endpoint_binder(binder: unknown): binder is Internal.Endpoint
  * @returns Boolean as a type predicate
  */
 export function is_static_binder(binder: unknown): binder is Internal.EndpointBinder<"static"> {
-  if (!is_binder(binder))
-    return false;
-  if (!("method_handlers" in binder))
-    return false;
-  if (typeof binder.method_handlers != "object" || binder.method_handlers == null)
+  if (!is_endpoint_binder(binder))
     return false;
 
-  // Ensures binder uses all methods (and are static responses)
-  const this_binder_methods = Object.keys(binder.method_handlers);
-  for (const method of Internal.endpoint_methods) {
-    if (!(this_binder_methods.includes(method)))
-      return false;
-    const handler = (binder.method_handlers as Record<Internal.EndpointMethod, unknown>)[method]
-    if (!is_response(handler))
+  // Ensures all request handlers are callbacks instead of responses objects
+  const binder_req_handlers = Object.values(binder.req_handlers);
+  for (const req_handler of binder_req_handlers) {
+    if (!is_response(req_handler))
       return false;
   }
 
@@ -196,9 +184,9 @@ export function is_static_binder(binder: unknown): binder is Internal.EndpointBi
 export function is_middleware_binder(binder: unknown): binder is Internal.MiddlewareBinder {
   if (!is_binder(binder))
     return false;
-  if (!("middleware_handler" in binder))
+  if (!("mid_req_handler" in binder))
     return false;
-  return typeof binder.middleware_handler == "function";
+  return typeof binder.mid_req_handler == "function";
 }
 
 /**

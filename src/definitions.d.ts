@@ -2,6 +2,62 @@
  * This file contains all the generic type definitions used either by the API consumer or by the internal implementation.
  */
 
+/*
+
+# Type narrowing problem identification
+
+Generic types who receive literal string unions as arguments causes the predicates not to work properly. A generic type is ultimately a type union, since all it's arguments and possible combinations of them finish with different ways of resolving the final type.
+
+To solve the problem then, we have to create union types which makes use of that generics in such way they explicitly set all arguments as single values rather than rely on type unions as arguments (literal string type unions in this case).
+
+The generalized error was also caused because the use of type arguments in generic functions / methods.
+
+So in order to correctly type narrow, we can conclude two different things:
+
+  1. Generic types have to be narrowed as much as possible by indicating all their type parameters without making use of type unions.
+
+  2. Type parameters at functions / methods are also related with the problem of type narrow at predicates.
+
+```typescript
+type EndpointBinderLike = Internal.EndpointBinder<"static"> | Internal.EndpointBinder<"non-static">
+
+function endpoint_binder_handler(binder: EndpointBinderLike) {
+  if (predicates.is_endpoint_binder(binder)) {
+    binder // Internal.EndpointBinder<"non-static">
+  } else {
+    binder // Internal.EndpointBinder<"static">
+  }
+}
+```
+
+Instead of...
+
+```typescript
+function endpoint_binder_handler(binder: Internal.EndpointBinder) {
+  if (predicates.is_endpoint_binder(binder)) {
+    binder // Narrowing error
+  } else {
+    binder // Narrowing error
+  }
+}
+```
+
+Or event worst...
+
+```typescript
+function endpoint_binder_handler<T extends Internal.EndpointBinder>(binder: T) {
+  if (predicates.is_endpoint_binder(binder)) {
+    binder // Narrowing error
+  } else {
+    binder // Narrowing error
+  }
+}
+```
+
+// TODO: Check global scoped type definitions system
+
+*/
+
 /**
  * Internal implementation's type definitions
  */
@@ -9,7 +65,7 @@ namespace Internal {
   /**
    * Allowed http request methods
    */
-  const endpoint_methods = ["get", "post", "patch", "delete"] as const;
+  const endpoint_methods = ["get", "post", "put", "delete", "patch", "head", "options", "trace", "connect"] as const;
   export type EndpointMethod = typeof endpoint_methods[number];
 
   /**
@@ -25,6 +81,7 @@ namespace Internal {
   export type BindContext = {
     /**
      * Includes all error messages were generated in that particular BinderChain
+     * // TODO: Enhance error_stack to allow a more sofisticated data type.
      */
     readonly error_stack: string[],
 
@@ -35,25 +92,24 @@ namespace Internal {
   /* Binder type definitions */
 
   /**
-   * Sets whether binder is endpoint or middleware kind
-   */
-  const binder_kinds = ["endpoint", "middlware"] as const;
-  export type BinderKind = typeof binder_kinds[number]
-
-  /**
    * Sets whether the endpoint binder uses handler endpoint functions or static generated responses.
    */
   const endpoint_kinds = ["non-static", "static"] as const;
   export type EndpointKind = typeof endpoint_kinds[number];
 
   /**
-   * Generic for all kind of endpoint binders
+   * Generic for all kind of endpoint binders.
    */
   export type EndpointBinder<T extends EndpointKind = EndpointKind> =
     {
       path: string;
-      method_handlers: Record<EndpointMethod, T extends "static" ? Response : EndpointHandler>;
+      req_handlers: Record<EndpointMethod, (T extends "static" ? Response : EndpointHandler) | null>;
     }
+
+  /**
+   * Union for all kind of endpoint binders. It is preferible to use this type against `EndpointBinder` if there is going to be a narrowing job over it.
+   */
+  export type EndpointBinderLike = EndpointBinder<"static"> | EndpointBinder<"non-static">
 
   /**
    * The only possibe middleware binder type
@@ -61,43 +117,38 @@ namespace Internal {
   export type MiddlewareBinder =
     {
       path: string;
-      middleware_handler: MiddlewareHandler;
+      mid_req_handler: MiddlewareHandler;
     }
 
   /**
-   * Generic that bundles all variants of binder type
+   * Union for all kind of binders
    */
-  export type Binder<T extends BinderKind = Binderkind, U extends EndpointKind = EndpointKind> =
-    T extends "endpoint" ? EndpointBinder<U> : MiddlewareBinder
+  export type Binder = EndpointBinderLike | MiddlewareBinder
 
   /**
-   * Helps getting the appropiated handler type for all kind of binders
+   * Helps getting the suitable handler type for all kind of binders
    */
   export type GetHandlerKind<T extends Binder> =
     T extends EndpointBinder ?
-    (EndpointBinder["method_handlers"][EndpointMethod]) :
-    MiddlewareBinder["middleware_handler"]
+    (EndpointBinder["req_handlers"][EndpointMethod]) :
+    MiddlewareBinder["mid_req_handler"]
 }
 
 /**
  * Both internal implementation and API consumer general purpuse type definitions 
  */
 declare global {
-
-  /* Global constants */
-  const error_middleware = true;
-
   /**
    * Type used inside non-static method_handlers binder
    */
-  type EndpointHandler = (req: Request, context: BindContext) => Response;
+  type EndpointHandler = (req: Request, context: Internal.BindContext) => Response;
 
   /**
    * Middleware binder handler. We use the same type of callbacks for standard middlewares and error middlewares, since both can the access the error stack inside context as given function parameter.
    * @param req Represents the incoming http request as a fetch API Response interface
    * @param next Next callback controls whether we step over the next middleware / final endpoint or we just enter into the error middleware chain
    */
-  type MiddlewareHandler = (req: Request, next: Internal.MiddlewareNext, context: BindContext) =>
+  type MiddlewareHandler = (req: Request, next: Internal.MiddlewareNext, context: Internal.BindContext) =>
     Response | ReturnType<Internal.MiddlewareNext>;
 
   /**
@@ -114,9 +165,7 @@ declare global {
    * }
    * ```
    */
-
   interface BindContextData { }
-
 }
 
 export { Internal };
